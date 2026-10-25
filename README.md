@@ -66,5 +66,40 @@ Resultado verificado:
 
 ---
 
-## 📦 Distribución en Haiku OS
+## 📦 Distribución e Instrucciones de Instalación en Haiku OS
+
 El driver se empaqueta de forma idiomática en un archivo **`.hpkg`** firmado que incluye el acelerador gráfico (`.accelerant`) para el `app_server` y el demonio de servicios de fondo (`radeon_gpud`).
+
+### 1. Compilación dentro del Árbol de Haiku
+Para compilar el driver nativamente utilizando el sistema de construcción de Haiku (`Jam`), sitúate en el directorio raíz del árbol de código fuente de Haiku y apunta al repositorio mediante la variable `RG_REPO`:
+
+```bash
+jam -sRG_REPO=/ruta/a/AMD-DriverRadeonLegacy radeon_hd radeon_gpud
+jam -sRG_REPO=/ruta/a/AMD-DriverRadeonLegacy -sRG_STANDALONE=1
+```
+
+### 2. Generación del Paquete `.hpkg`
+Para empaquetar los binarios generados en un paquete instalable de Haiku:
+
+```bash
+package create -m package.info radeon_legacy_driver.hpkg
+```
+
+### 3. Instalación en el Sistema
+Puedes instalar el paquete generado ejecutándolo directamente con el gestor de paquetes de Haiku o copiándolo a la ruta del sistema:
+
+```bash
+pkginstall radeon_legacy_driver.hpkg
+```
+
+O de forma manual:
+- **Ayudante de Kernel / Driver:** `/boot/system/add-ons/kernel/drivers/bin/radeon_hd`
+- **Acelerador Gráfico (`.accelerant`):** `/boot/system/add-ons/accelerants/radeon_legacy.accelerant`
+- **Servidor Gráfico / Demonio IPC:** `/boot/system/bin/radeon_gpud`
+- **Ficheros de Firmware:** `/boot/system/data/firmware/radeon/`
+
+---
+
+## 🔍 Fidelidad del API de Haiku
+Para consultar la auditoría detallada sobre el cumplimiento de los estándares de BeOS/Haiku (`create_area`, `clone_area`, `status_t`, `Accelerant`), consulta [docs/HAIKU_API_FIDELITY.md](docs/HAIKU_API_FIDELITY.md).
+
