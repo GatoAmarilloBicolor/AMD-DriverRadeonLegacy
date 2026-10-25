@@ -17,7 +17,8 @@
 RgServer::RgServer(uint64_t vram_size, uint64_t gart_size)
 	: fRings(),
 	  fMemory(vram_size, gart_size, &fRings),
-	  fVerifier(rg_policy_deny_all)
+	  fVerifier(rg_policy_deny_all),
+	  fLogger(std::make_unique<DefaultLogger>(RG_LOG_INFO))
 {
 	fAsic = *rg_asic_lookup(0x9440, 0xFFFFFFFF, 0xFFFFFFFF); /* bring-up R600 */
 }
@@ -44,7 +45,7 @@ void RgServer::drop_team(uint32_t team)
 	fVmids.release(team);
 	std::lock_guard<std::mutex> guard(fTeamsLock);
 	fTeams.erase(team);
-	rg_kernel_debug_printf("[IPC_SERVER] Equipo huérfano %u purgado de forma sincrónica.", team);
+	rg_kernel_debug_printf(fLogger.get(), "[IPC_SERVER] Equipo huérfano %u purgado de forma sincrónica.", team);
 }
 
 int32_t RgServer::handle_info(void *reply, uint32_t reply_size)

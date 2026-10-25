@@ -6,6 +6,10 @@
 #include <cstdlib>
 #include <cstdarg>
 
+#ifdef __cplusplus
+#include "logger.h"
+#endif
+
 bool rg_safe_add_overflow(uint64_t a, uint64_t b, uint64_t *result)
 {
 	if (UINT64_MAX - a < b)
@@ -64,6 +68,36 @@ bool rg_validate_simd_buffer_alignment(const void *ptr, size_t alignment)
 	return ((uintptr_t)ptr % alignment) == 0;
 }
 
+#ifdef __cplusplus
+void rg_kernel_debug_printf(ILogger *logger, const char *fmt, ...)
+{
+	if (logger && logger->is_enabled(RG_LOG_DEBUG)) {
+		va_list args;
+		va_start(args, fmt);
+		rg_log_context ctx = {0, 0, 0, nullptr, 0};
+		logger->log(RG_LOG_DEBUG, &ctx, fmt, args);
+		va_end(args);
+	}
+}
+
+void rg_audit_log_error(ILogger *logger, int32_t error_code, const char *context)
+{
+	if (logger && logger->is_enabled(RG_LOG_ERROR) && error_code < 0) {
+		rg_log_context ctx = {0, 0, 0, nullptr, 0};
+		logger->log(RG_LOG_ERROR, &ctx, "[RADEON_AUDIT_ERROR] Code: %d | Context: %s", 
+			error_code, context ? context : "unknown");
+	}
+}
+
+void rg_record_telemetry_metric(ILogger *logger, const char *metric_name, uint64_t value)
+{
+	if (logger && logger->is_enabled(RG_LOG_INFO) && metric_name) {
+		rg_log_context ctx = {0, 0, 0, nullptr, 0};
+		logger->log(RG_LOG_INFO, &ctx, "[TELEMETRY_METRIC] %s = %llu", 
+			metric_name, (unsigned long long)value);
+	}
+}
+#else
 void rg_kernel_debug_printf(const char *fmt, ...)
 {
 	va_list args;
@@ -87,3 +121,4 @@ void rg_record_telemetry_metric(const char *metric_name, uint64_t value)
 		std::fflush(stdout);
 	}
 }
+#endif

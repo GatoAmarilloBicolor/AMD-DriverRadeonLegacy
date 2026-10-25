@@ -11,10 +11,11 @@
 
 class MemoryManager;
 class RingManager;
+class ILogger;
 
 class RadeonSupervisor {
 public:
-	RadeonSupervisor(MemoryManager &memory, RingManager &rings);
+	RadeonSupervisor(MemoryManager &memory, RingManager &rings, ILogger &logger);
 	~RadeonSupervisor();
 
 	void start();
@@ -25,6 +26,7 @@ private:
 
 	MemoryManager &fMemory;
 	RingManager &fRings;
+	ILogger &fLogger;
 	std::thread fThread;
 	std::atomic<bool> fRunning{false};
 };

@@ -4,11 +4,11 @@
 #include "radeon_supervisor.h"
 #include "memory_manager.h"
 #include "ring_manager.h"
-#include "radeon_hardening.h"
+#include "logger.h"
 #include <chrono>
 
-RadeonSupervisor::RadeonSupervisor(MemoryManager &memory, RingManager &rings)
-	: fMemory(memory), fRings(rings)
+RadeonSupervisor::RadeonSupervisor(MemoryManager &memory, RingManager &rings, ILogger &logger)
+	: fMemory(memory), fRings(rings), fLogger(logger)
 {
 }
 
@@ -42,17 +42,17 @@ void RadeonSupervisor::supervisor_loop()
 		/* 1. Watchdog de Ring Buffers y monitoreo de colas */
 		uint32_t pending_gfx = fRings.pending(RG_RING_GFX);
 		if (pending_gfx > 100) {
-			rg_kernel_debug_printf("[SUPERVISOR] Advertencia: Cola GFX saturada (%u IBs pendientes).", pending_gfx);
+			RG_LOG(&fLogger, RG_LOG_WARN, "[SUPERVISOR] Advertencia: Cola GFX saturada (%u IBs pendientes).", pending_gfx);
 		}
 
 		/* 2. Telemetría y estimación de saturación de bus PCIe (Punto 5 y 30) */
 		uint64_t vram_used = fMemory.vram_used();
 		uint64_t evictions = fMemory.evictions();
-		rg_record_telemetry_metric("vram_used_bytes", vram_used);
-		rg_record_telemetry_metric("eviction_count", evictions);
+		RG_LOG(&fLogger, RG_LOG_INFO, "[TELEMETRY_METRIC] vram_used_bytes = %llu", (unsigned long long)vram_used);
+		RG_LOG(&fLogger, RG_LOG_INFO, "[TELEMETRY_METRIC] eviction_count = %llu", (unsigned long long)evictions);
 		
 		if (evictions > 50) {
-			rg_kernel_debug_printf("[SUPERVISOR] Alerta PCIe: Alto índice de desalojos VRAM->GTT (%llu). Posible saturación de bus.", (unsigned long long)evictions);
+			RG_LOG(&fLogger, RG_LOG_WARN, "[SUPERVISOR] Alerta PCIe: Alto índice de desalojos VRAM->GTT (%llu). Posible saturación de bus.", (unsigned long long)evictions);
 		}
 	}
 }

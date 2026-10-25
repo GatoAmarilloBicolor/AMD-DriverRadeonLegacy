@@ -16,6 +16,7 @@
 #include "memory_manager.h"
 #include "ring_manager.h"
 #include "cs_verifier.h"
+#include "logger.h"
 #include "asic/rg_asic.h"
 #include "gcn/gpuvm.h"
 
@@ -56,6 +57,7 @@ public:
 	MemoryManager &memory() { return fMemory; }
 	RingManager &rings() { return fRings; }
 	CsVerifier &verifier() { return fVerifier; }
+	ILogger &logger() { return *fLogger; }
 
 	/* Politica activa: deny-all salvo que se instale la de test/produccion. */
 	void set_policy(const rg_cs_policy &policy) { fVerifier = CsVerifier(policy); }
@@ -79,6 +81,7 @@ private:
 	RingManager fRings;  // Must be declared before fMemory for initialization order
 	MemoryManager fMemory;
 	CsVerifier fVerifier;
+	std::unique_ptr<ILogger> fLogger;
 	VmidManager fVmids;
 	std::map<uint32_t, rg_team_state> fTeams;
 	std::mutex fTeamsLock;

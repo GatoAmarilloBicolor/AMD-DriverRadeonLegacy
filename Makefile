@@ -55,7 +55,8 @@ SERVER_CXX := \
 	src/server/r600_streamout_compute.cpp \
 	src/server/ipc_zerocopy.cpp \
 	src/server/rocm_runtime.cpp \
-	src/server/vram_compression.cpp
+	src/server/vram_compression.cpp \
+	src/server/logger.cpp
 
 LVP_CXX := src/lvp_hw/lvp_planner.cpp src/lvp_hw/lvp_exec_cpu.cpp
 

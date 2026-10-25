@@ -10,6 +10,7 @@
 #include "../common/rg_types.h"
 
 #ifdef __cplusplus
+class ILogger;
 extern "C" {
 #endif
 
@@ -29,12 +30,16 @@ bool rg_check_gpu_hang_timeout(uint64_t last_fence, uint64_t current_fence);
 /* 16-20. Validación SIMD y Alineación */
 bool rg_validate_simd_buffer_alignment(const void *ptr, size_t alignment);
 
-/* 21-25. Abstracción y Trazas de Kernel */
+/* 21-25. Abstracción y Trazas de Kernel - Now using ILogger */
+#ifdef __cplusplus
+void rg_kernel_debug_printf(ILogger *logger, const char *fmt, ...);
+void rg_audit_log_error(ILogger *logger, int32_t error_code, const char *context);
+void rg_record_telemetry_metric(ILogger *logger, const char *metric_name, uint64_t value);
+#else
 void rg_kernel_debug_printf(const char *fmt, ...);
-
-/* 26-30. Telemetría y Auditoría de Errores */
 void rg_audit_log_error(int32_t error_code, const char *context);
 void rg_record_telemetry_metric(const char *metric_name, uint64_t value);
+#endif
 
 #ifdef __cplusplus
 }
