@@ -12,7 +12,7 @@
 #include <sys/mman.h>
 #include <cstdio>
 /* Fallback transparente de Huge Pages a páginas estándar con registro de advertencia (Punto 1) */
-static void *host_alloc_aligned(size_t size, size_t align)
+void *host_alloc_aligned(size_t size, size_t align)
 {
 	void *p = nullptr;
 #ifdef MAP_HUGETLB
@@ -30,10 +30,10 @@ static void *host_alloc_aligned(size_t size, size_t align)
 	std::memset(p, 0, size);
 	return p;
 }
-static void host_free(void *p) { free(p); }
+void host_free(void *p) { free(p); }
 #else
 #include <OS.h>
-static void *host_alloc_aligned(size_t size, size_t align)
+void *host_alloc_aligned(size_t size, size_t align)
 {
 	void *p = nullptr;
 	uint32_t flags = (size >= (2048 * 1024)) ? B_LARGE_MEMORY : B_NO_LOCK;
@@ -42,7 +42,7 @@ static void *host_alloc_aligned(size_t size, size_t align)
 	(void)align;
 	return p;
 }
-static void host_free(void *p) { (void)p; }
+void host_free(void *p) { (void)p; }
 #endif
 
 MemoryManager::MemoryManager(uint64_t vram_size, uint64_t gart_size)
@@ -92,8 +92,8 @@ bool MemoryManager::try_evict_one(void)
 {
 	rg_bo *victim = nullptr;
 	for (auto &entry : fBos) {
-		rg_bo &bo = entry.second;
-		if (bo.domain != RG_DOMAIN_VRAM || bo.busy != 0 || bo.host_ptr == nullptr)
+		rg_bo &bo = *entry.second;
+		if (bo.domain != RG_DOMAIN_VRAM || bo.busy != 0 || !bo.host_ptr)
 			continue;
 		if (victim == nullptr || bo.last_used < victim->last_used)
 			victim = &bo;
@@ -228,7 +228,7 @@ int32_t MemoryManager::create_bo(uint32_t team, const rg_bo_create &req, rg_bo_r
 			bo.gpu_addr = off; /* VRAM es visible en [0, vram_size) */
 		}
 	}
-	if (bo.host_ptr == nullptr && err != RG_OK && (req.domains & RG_DOMAIN_GTT)) {
+	if (!bo.host_ptr && err != RG_OK && (req.domains & RG_DOMAIN_GTT)) {
 		uint64_t off = 0;
 		err = alloc_gtt(size, align, &off);
 		if (err == RG_OK) {
@@ -237,7 +237,7 @@ int32_t MemoryManager::create_bo(uint32_t team, const rg_bo_create &req, rg_bo_r
 			bo.gpu_addr = 0x80000000ull + off; /* ventana GTT */
 		}
 	}
-	if (bo.host_ptr == nullptr && err != RG_OK) {
+	if (!bo.host_ptr && err != RG_OK) {
 		/* CPU: siempre puede, vive en GTT conceptualmente accesible */
 		uint64_t off = 0;
 		err = alloc_gtt(size, align, &off);
@@ -250,18 +250,18 @@ int32_t MemoryManager::create_bo(uint32_t team, const rg_bo_create &req, rg_bo_r
 	if (err != RG_OK)
 		return err;
 
-	bo.host_ptr = static_cast<uint8_t *>(host_alloc_aligned((size_t)size, (size_t)align));
-	if (bo.host_ptr == nullptr && (req.domains & RG_DOMAIN_CPU) == 0) {
+	bo.host_ptr = HostPtr(static_cast<uint8_t *>(host_alloc_aligned((size_t)size, (size_t)align)));
+	if (!bo.host_ptr && (req.domains & RG_DOMAIN_CPU) == 0) {
 		/* El BO puede no mapearse a CPU hasta RG_BO_MMAP. */
 		bo.area = -1;
-	} else if (bo.host_ptr == nullptr) {
+	} else if (!bo.host_ptr) {
 		if (bo.domain == RG_DOMAIN_VRAM) free_vram(bo.offset, bo.size);
 		else free_gtt(bo.offset, bo.size);
 		return RG_ENOMEM;
 	}
 	bo.area = fNextArea++;
 
-	fBos[bo.handle] = bo;
+	fBos[bo.handle] = std::make_unique<rg_bo>(std::move(bo));
 
 	out->status = RG_OK;
 	out->handle = bo.handle;
@@ -274,17 +274,17 @@ int32_t MemoryManager::create_bo(uint32_t team, const rg_bo_create &req, rg_bo_r
 rg_bo *MemoryManager::find_owned(uint32_t team, uint32_t handle)
 {
 	auto it = fBos.find(handle);
-	if (it == fBos.end() || it->second.team_id != team)
+	if (it == fBos.end() || it->second->team_id != team)
 		return nullptr;
-	return &it->second;
+	return it->second.get();
 }
 
 const rg_bo *MemoryManager::find_owned(uint32_t team, uint32_t handle) const
 {
 	auto it = fBos.find(handle);
-	if (it == fBos.end() || it->second.team_id != team)
+	if (it == fBos.end() || it->second->team_id != team)
 		return nullptr;
-	return &it->second;
+	return it->second.get();
 }
 
 const rg_bo *MemoryManager::lookup(uint32_t team, uint32_t handle) const
@@ -302,15 +302,15 @@ int32_t MemoryManager::map_bo(uint32_t team, uint32_t handle, uint32_t map_flags
 	rg_bo *bo = find_owned(team, handle);
 	if (bo == nullptr)
 		return RG_EACCES;
-	if (bo->host_ptr == nullptr) {
-		bo->host_ptr = static_cast<uint8_t *>(
-			host_alloc_aligned((size_t)bo->size, (size_t)bo->alignment));
-		if (bo->host_ptr == nullptr)
+	if (!bo->host_ptr) {
+		bo->host_ptr = HostPtr(static_cast<uint8_t *>(
+			host_alloc_aligned((size_t)bo->size, (size_t)bo->alignment)));
+		if (!bo->host_ptr)
 			return RG_ENOMEM;
 		bo->area = fNextArea++;
 	}
 	bo->last_used = fClock++;
-	*ptr = bo->host_ptr;
+	*ptr = bo->host_ptr.get();
 	return RG_OK;
 }
 
@@ -362,8 +362,7 @@ int32_t MemoryManager::is_busy(uint32_t team, uint32_t handle, uint32_t *busy)
 
 void MemoryManager::destroy_bo(rg_bo &bo)
 {
-	if (bo.host_ptr != nullptr)
-		host_free(bo.host_ptr);
+	bo.host_ptr.reset();  // RAII: automatically calls host_free
 	if (bo.domain == RG_DOMAIN_VRAM)
 		free_vram(bo.offset, bo.size);
 	else
@@ -376,8 +375,11 @@ int32_t MemoryManager::close_bo(uint32_t team, uint32_t handle)
 	rg_bo *bo = find_owned(team, handle);
 	if (bo == nullptr)
 		return RG_EACCES;
-	destroy_bo(*bo);
-	fBos.erase(handle);
+	auto it = fBos.find(handle);
+	if (it != fBos.end()) {
+		destroy_bo(*it->second);
+		fBos.erase(it);
+	}
 	return RG_OK;
 }
 
@@ -385,8 +387,8 @@ void MemoryManager::release_team(uint32_t team)
 {
 	std::lock_guard<std::mutex> guard(fLock);
 	for (auto it = fBos.begin(); it != fBos.end();) {
-		if (it->second.team_id == team) {
-			destroy_bo(it->second);
+		if (it->second->team_id == team) {
+			destroy_bo(*it->second);
 			it = fBos.erase(it);
 		} else {
 			++it;

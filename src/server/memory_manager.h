@@ -8,6 +8,7 @@
 #define RG_MEMORY_MANAGER_H
 
 #include <stdint.h>
+#include <memory>
 #include <mutex>
 #include <map>
 #include <set>
@@ -15,6 +16,16 @@
 
 #include "../common/rg_types.h"
 #include "../common/rg_ipc.h"
+
+/* Forward declarations for allocator functions */
+extern void *host_alloc_aligned(size_t size, size_t align);
+extern void host_free(void *p);
+
+/* RAII wrapper for host-allocated memory (huge-page aware) */
+struct HostDeleter {
+    void operator()(uint8_t *p) const { host_free(p); }
+};
+using HostPtr = std::unique_ptr<uint8_t[], HostDeleter>;
 
 struct rg_bo {
 	uint32_t handle;
@@ -31,7 +42,7 @@ struct rg_bo {
 	uint64_t gpu_addr;     /* direccion que ve la GPU */
 	uint64_t offset;       /* offset dentro del dominio (VRAM) o de la GTT */
 	int32_t  area;         /* area_id mapeada (o -1) */
-	uint8_t *host_ptr;     /* puntero CPU (simulado o mapeado) */
+	HostPtr  host_ptr;     /* puntero CPU con RAII (simulado o mapeado) */
 	void    *fence_slot;   /* direccion GTT para fences, si aplica */
 };
 
@@ -78,7 +89,7 @@ private:
 
 	std::vector<Range> fVramFree;
 	std::vector<Range> fGartFree;
-	std::map<uint32_t, rg_bo> fBos;
+	std::map<uint32_t, std::unique_ptr<rg_bo>> fBos;
 	mutable std::mutex fLock;
 };
 

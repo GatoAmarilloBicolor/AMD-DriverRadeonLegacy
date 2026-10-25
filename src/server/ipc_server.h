@@ -13,8 +13,6 @@
 #include <mutex>
 #include <vector>
 
-#include "../common/rg_types.h"
-#include "../common/rg_ipc.h"
 #include "memory_manager.h"
 #include "ring_manager.h"
 #include "cs_verifier.h"
@@ -25,6 +23,23 @@ struct rg_team_state {
 	uint32_t vmid = 0;
 	bool has_vmid = false;
 	std::unique_ptr<GpuVm> vm;
+};
+
+/* Zero-allocation BO resolver for CsVerifier (implements IBoResolver) */
+class BoResolver : public CsVerifier::IBoResolver {
+public:
+	BoResolver(const MemoryManager &mem, uint32_t team) : fMem(mem), fTeam(team) {}
+	bool resolve(uint32_t handle, rg_bo_view *out) const override {
+		const rg_bo *bo = fMem.lookup(fTeam, handle);
+		if (bo == nullptr)
+			return false;
+		out->gpu_addr = bo->gpu_addr;
+		out->size = bo->size;
+		return true;
+	}
+private:
+	const MemoryManager &fMem;
+	uint32_t fTeam;
 };
 
 class RgServer {

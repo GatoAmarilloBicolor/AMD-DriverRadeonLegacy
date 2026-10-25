@@ -169,14 +169,7 @@ int32_t RgServer::handle_cs(uint32_t team, const void *payload,
 	const uint32_t *ib = reinterpret_cast<const uint32_t *>(extra);
 	const rg_reloc *relocs = reinterpret_cast<const rg_reloc *>(extra + ib_bytes);
 
-	auto resolver = [this, team](uint32_t handle, rg_bo_view *out) {
-		const rg_bo *bo = fMemory.lookup(team, handle);
-		if (bo == nullptr)
-			return false;
-		out->gpu_addr = bo->gpu_addr;
-		out->size = bo->size;
-		return true;
-	};
+	BoResolver resolver(fMemory, team);
 
 	rg_verify_result vr;
 	int32_t st = fVerifier.verify(ib, cs->ib_dwords, relocs, cs->n_relocs,

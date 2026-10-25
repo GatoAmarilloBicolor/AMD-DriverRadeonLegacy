@@ -38,7 +38,7 @@ typedef enum rg_family {
 	RG_FAMILY_RDNA4 = 12       /* GFX12 */
 } rg_family;
 
-/* Nivel GFX mayor para decisiones de backend. */
+/* Nivel GFX mayor para decisiones de backend (C version). */
 static inline uint32_t rg_family_gfx_level(rg_family f)
 {
 	switch (f) {
@@ -107,6 +107,58 @@ enum {
 
 #ifdef __cplusplus
 }
+#endif
+
+#ifdef __cplusplus
+/* C++-only: constexpr table for gfx level (compile-time branchless) */
+#include <array>
+constexpr std::array<uint32_t, RG_FAMILY_RDNA4 + 1> kGfxLevelTable = {
+    0,  /* RG_FAMILY_UNKNOWN */
+    0,  /* RG_FAMILY_R300 */
+    0,  /* RG_FAMILY_R600 */
+    0,  /* RG_FAMILY_EVERGREEN */
+    0,  /* RG_FAMILY_NI */
+    6,  /* RG_FAMILY_GCN1 */
+    7,  /* RG_FAMILY_GCN2 */
+    8,  /* RG_FAMILY_GCN3 */
+    9,  /* RG_FAMILY_GCN5 */
+    10, /* RG_FAMILY_RDNA1 */
+    10, /* RG_FAMILY_RDNA2 */
+    11, /* RG_FAMILY_RDNA3 */
+    12  /* RG_FAMILY_RDNA4 */
+};
+constexpr uint32_t rg_family_gfx_level_cpp(rg_family f)
+{
+    return (f <= RG_FAMILY_RDNA4) ? kGfxLevelTable[static_cast<size_t>(f)] : 0;
+}
+
+/* Strong typedefs for type safety (compile-time zero-cost abstraction) */
+template <typename T, typename Tag>
+struct StrongType {
+    T value;
+    constexpr StrongType() = default;
+    constexpr explicit StrongType(T v) : value(v) {}
+    constexpr operator T() const { return value; }
+    constexpr bool operator==(StrongType other) const { return value == other.value; }
+    constexpr bool operator!=(StrongType other) const { return value != other.value; }
+    constexpr bool operator<(StrongType other) const { return value < other.value; }
+};
+
+using TeamId      = StrongType<uint32_t, struct TeamTag>;
+using BoHandle    = StrongType<uint32_t, struct BoHandleTag>;
+using GpuAddr     = StrongType<uint64_t, struct GpuAddrTag>;
+using Vmid        = StrongType<uint32_t, struct VmidTag>;
+using FenceValue  = StrongType<uint64_t, struct FenceTag>;
+using SeqNum      = StrongType<uint32_t, struct SeqTag>;
+using AreaId      = StrongType<int32_t, struct AreaTag>;
+
+inline TeamId      make_team(uint32_t v)      { return TeamId(v); }
+inline BoHandle    make_bo_handle(uint32_t v) { return BoHandle(v); }
+inline GpuAddr     make_gpu_addr(uint64_t v)  { return GpuAddr(v); }
+inline Vmid        make_vmid(uint32_t v)      { return Vmid(v); }
+inline FenceValue  make_fence(uint64_t v)     { return FenceValue(v); }
+inline SeqNum      make_seq(uint32_t v)       { return SeqNum(v); }
+inline AreaId      make_area(int32_t v)       { return AreaId(v); }
 #endif
 
 #endif /* RG_TYPES_H */
