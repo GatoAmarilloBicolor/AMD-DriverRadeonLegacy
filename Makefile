@@ -54,7 +54,8 @@ SERVER_CXX := \
 	src/server/radeon_simd_dispatch.cpp \
 	src/server/r600_streamout_compute.cpp \
 	src/server/ipc_zerocopy.cpp \
-	src/server/rocm_runtime.cpp
+	src/server/rocm_runtime.cpp \
+	src/server/vram_compression.cpp
 
 LVP_CXX := src/lvp_hw/lvp_planner.cpp src/lvp_hw/lvp_exec_cpu.cpp
 
