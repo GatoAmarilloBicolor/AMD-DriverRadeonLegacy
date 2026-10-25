@@ -1,0 +1,25 @@
+# Haiku Accelerant Add-on (ADR-004, Fase 2).
+#
+# Se publica como add-ons/accelerants/radeon_legacy.so
+# y se carga por app_server al detectar la GPU.
+#
+# Uso (desde el árbol de Haiku):
+#   jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy radeon_legacy
+
+SubDir HAIKU_TOP src add-ons accelerants radeon_legacy ;
+
+if $(RG_REPO) = "" {
+	Echo "RG_REPO no definido: jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy" ;
+	Exit 1 ;
+}
+
+SEARCH on [ FGristFiles radeon_legacy_driver.cpp haiku_kits_integration.cpp ] =
+	[ FDirName $(RG_REPO) src haiku_addon ] ;
+
+# Flags necesarios para el acelerador
+AddonFlags = -DRG_ACCELERANT ;
+SubDirCcFlags $(AddonFlags) ;
+
+Addon radeon_legacy.so :
+	radeon_legacy_driver.cpp
+	haiku_kits_integration.cpp ;
