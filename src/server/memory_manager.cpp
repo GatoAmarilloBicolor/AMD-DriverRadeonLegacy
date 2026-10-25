@@ -1,5 +1,6 @@
 #include "gart.h"
 #include "ring_manager.h"
+#include "vram_compression.h"
 /*
  * memory_manager.cpp - Implementacion del gestor de BOs con soporte de Huge Pages (2MB+)
  */
@@ -47,7 +48,7 @@ void host_free(void *p) { (void)p; }
 #endif
 
 MemoryManager::MemoryManager(uint64_t vram_size, uint64_t gart_size, IFenceAllocator *fence_alloc)
-	: fVramSize(vram_size), fGartSize(gart_size), fFenceAlloc(fence_alloc)
+	: fVramSize(vram_size), fGartSize(gart_size), fFenceAlloc(fence_alloc), fPressureMonitor()
 {
 	if (fVramSize == 0)
 		fVramSize = 256ull << 20;
@@ -114,6 +115,7 @@ bool MemoryManager::try_evict_one(void)
 	victim->gpu_addr = 0x80000000ull + gtt_off;
 	free_vram(old_offset, victim->size);
 	fEvictions++;
+	update_pressure_state();
 	return true;
 }
 
@@ -131,7 +133,28 @@ int32_t MemoryManager::alloc_vram_evicting(uint64_t size, uint64_t align,
 		err = alloc_vram(size, align, offset);
 		attempts++;
 	}
+	update_pressure_state();
 	return err;
+}
+
+void MemoryManager::update_pressure_state()
+{
+	/* Consider severe pressure when VRAM usage > 80% and no free blocks > 16MB */
+	bool severe = false;
+	if (fVramSize > 0) {
+		double usage_ratio = static_cast<double>(fVramUsed) / static_cast<double>(fVramSize);
+		if (usage_ratio > 0.8) {
+			/* Check if largest free block is small */
+			uint64_t largest_free = 0;
+			for (const auto &range : fVramFree) {
+				if (range.size > largest_free)
+					largest_free = range.size;
+			}
+			if (largest_free < (16ull << 20))  // < 16MB
+				severe = true;
+		}
+	}
+	fPressureMonitor.set_severe_pressure(severe);
 }
 
 void MemoryManager::free_vram(uint64_t offset, uint64_t size)

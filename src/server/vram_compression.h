@@ -23,6 +23,46 @@ struct vram_surface {
 };
 
 #ifdef __cplusplus
+#include <vector>
+#include <algorithm>
+
+/* Observer interface for VRAM pressure notifications */
+class IVramPressureObserver {
+public:
+    virtual ~IVramPressureObserver() = default;
+    virtual void on_pressure_changed(bool severe_pressure) = 0;
+};
+
+/* VRAM pressure monitor - notifies observers when pressure state changes */
+class VramPressureMonitor {
+public:
+    VramPressureMonitor() : fSeverePressure(false) {}
+    
+    void add_observer(IVramPressureObserver *observer) {
+        fObservers.push_back(observer);
+    }
+    
+    void remove_observer(IVramPressureObserver *observer) {
+        auto it = std::find(fObservers.begin(), fObservers.end(), observer);
+        if (it != fObservers.end())
+            fObservers.erase(it);
+    }
+    
+    void set_severe_pressure(bool pressure) {
+        if (fSeverePressure != pressure) {
+            fSeverePressure = pressure;
+            for (auto *obs : fObservers)
+                obs->on_pressure_changed(pressure);
+        }
+    }
+    
+    bool is_severe_pressure() const { return fSeverePressure; }
+    
+private:
+    bool fSeverePressure;
+    std::vector<IVramPressureObserver *> fObservers;
+};
+
 extern "C" {
 #endif
 
@@ -38,5 +78,8 @@ bool vram_quantize_texture_to_16bit(const uint32_t *src_rgba8, uint16_t *dst_rgb
 #ifdef __cplusplus
 }
 #endif
+
+/* Register VRAM compression observer with pressure monitor */
+void vram_register_pressure_observer(VramPressureMonitor *monitor);
 
 #endif /* VRAM_COMPRESSION_H */

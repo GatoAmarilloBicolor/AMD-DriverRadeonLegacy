@@ -10,6 +10,7 @@
  */
 #include "ipc_server.h"
 #include "radeon_hardening.h"
+#include "vram_compression.h"
 
 #include <cstring>
 #include <signal.h>
@@ -21,6 +22,8 @@ RgServer::RgServer(uint64_t vram_size, uint64_t gart_size)
 	  fLogger(std::make_unique<DefaultLogger>(RG_LOG_INFO))
 {
 	fAsic = *rg_asic_lookup(0x9440, 0xFFFFFFFF, 0xFFFFFFFF); /* bring-up R600 */
+	/* Register VRAM compression observer with pressure monitor */
+	vram_register_pressure_observer(&fMemory.pressure_monitor());
 }
 
 rg_team_state &RgServer::team_state(uint32_t team)

@@ -16,6 +16,8 @@
 
 #include "../common/rg_types.h"
 #include "../common/rg_ipc.h"
+#include "vram_compression.h"
+#include "vram_compression.h"
 
 /* Forward declarations for allocator functions */
 extern void *host_alloc_aligned(size_t size, size_t align);
@@ -46,7 +48,7 @@ struct rg_bo {
 	uint64_t offset;       /* offset dentro del dominio (VRAM) o de la GTT */
 	int32_t  area;         /* area_id mapeada (o -1) */
 	HostPtr  host_ptr;     /* puntero CPU con RAII (simulado o mapeado) */
-	void    *fence_slot;   /* direccion GTT para fences, si aplica (owned by IFenceAllocator) */
+	void    *fence_slot;   /* direccion GTT para fences, si aplica */
 };
 
 class MemoryManager {
@@ -69,6 +71,10 @@ public:
 	/* Fence allocator management */
 	void set_fence_allocator(IFenceAllocator *alloc) { fFenceAlloc = alloc; }
 
+	/* VRAM pressure monitor access */
+	VramPressureMonitor &pressure_monitor() { return fPressureMonitor; }
+	const VramPressureMonitor &pressure_monitor() const { return fPressureMonitor; }
+
 	uint64_t vram_used() const { return fVramUsed; }
 	uint64_t gart_used() const { return fGartUsed; }
 	uint32_t bo_count() const { return (uint32_t)fBos.size(); }
@@ -85,6 +91,7 @@ private:
 	rg_bo *find_owned(uint32_t team, uint32_t handle);
 	const rg_bo *find_owned(uint32_t team, uint32_t handle) const;
 	void destroy_bo(rg_bo &bo);
+	void update_pressure_state();
 
 	uint64_t fVramSize, fGartSize;
 	uint64_t fVramUsed = 0, fGartUsed = 0;
@@ -94,6 +101,7 @@ private:
 	int32_t  fNextArea = 1;
 
 	IFenceAllocator *fFenceAlloc = nullptr;
+	VramPressureMonitor fPressureMonitor;
 
 	std::vector<Range> fVramFree;
 	std::vector<Range> fGartFree;

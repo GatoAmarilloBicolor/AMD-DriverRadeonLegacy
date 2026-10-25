@@ -5,6 +5,8 @@
 #include "vram_compression.h"
 #include <string.h>
 #include <stdlib.h>
+#include <vector>
+#include <algorithm>
 
 /* ---------- LZ4 fast path (stub; replace with real LZ4 if available) ---------- */
 static bool lz4_compress(const void *src, size_t src_size, void *dst, size_t *dst_size)
@@ -82,8 +84,34 @@ static bool vram_dequantize_16bit_to_32bit(const uint16_t *src_rgb565, uint32_t 
 	return true;
 }
 
-/* ---------- Stress heuristic ------------------------------------------------ */
-extern "C" bool vram_is_under_severe_pressure(void);  // provided by memory_manager.cpp
+/* ---------- VRAM Pressure Observer Implementation ----------------------------- */
+class VramCompressionObserver : public IVramPressureObserver {
+public:
+    VramCompressionObserver() : fSeverePressure(false) {}
+    
+    void on_pressure_changed(bool severe_pressure) override {
+        fSeverePressure = severe_pressure;
+    }
+    
+    bool is_severe_pressure() const { return fSeverePressure; }
+    
+private:
+    bool fSeverePressure;
+};
+
+static VramCompressionObserver gVramCompressionObserver;
+
+/* C-compatible function for vram_compress_surface to check pressure */
+extern "C" bool vram_is_under_severe_pressure(void) {
+    return gVramCompressionObserver.is_severe_pressure();
+}
+
+/* Public API to register observer with VramPressureMonitor */
+void vram_register_pressure_observer(VramPressureMonitor *monitor) {
+    if (monitor) {
+        monitor->add_observer(&gVramCompressionObserver);
+    }
+}
 
 /* ---------- Public API ------------------------------------------------------ */
 bool vram_compress_surface(struct vram_surface *surface)
