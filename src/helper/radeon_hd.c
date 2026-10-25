@@ -145,13 +145,21 @@ static area_id map_bar(const char *name, uint64_t phys, uint64_t size,
 {
 #ifdef __HAIKU__
 	uint32_t flags;
-	if (write_combining)
+	if (write_combining) {
 		flags = B_ANY_KERNEL_BLOCK_ADDRESS | B_WRITE_COMBINING_MEMORY;
-	else
+	} else {
 		flags = B_ANY_KERNEL_ADDRESS;
+	}
+	
+	/* Use B_LARGE_MEMORY for VRAM >= 2MB for huge pages (2MB) */
+	if (!write_combining && size >= (2ull << 20)) {
+		flags |= B_LARGE_MEMORY;
+	}
+	
 	/* Kernel + user + cloneable: el servidor clona el area desde userland. */
 	uint32_t protection = B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA
 		| B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA;
+	
 	return map_physical_memory(name, (phys_addr_t)phys, (size_t)size,
 		flags, protection, virt);
 #else
@@ -601,21 +609,45 @@ static device_hooks g_device_hooks = {
 	.control_hook = rg_control,
 };
 
+/* Helper to clone kernel area into userland address space (server clones for clients) */
+#ifdef __HAIKU__
+static status_t clone_area_for_user(area_id kernel_area, const char *name, void **user_addr)
+{
+	if (kernel_area < 0)
+		return B_BAD_VALUE;
+	
+	area_id user_area = clone_area(name, user_addr, B_ANY_ADDRESS,
+		B_READ_AREA | B_WRITE_AREA, kernel_area);
+	if (user_area < 0)
+		return user_area;
+	
+	return B_OK;
+}
+#else
+static status_t clone_area_for_user(area_id kernel_area, const char *name, void **user_addr)
+{
+	(void)kernel_area; (void)name; (void)user_addr;
+	return B_OK;
+}
+#endif
+
 /* --- entry points ------------------------------------------------ */
 status_t init_hardware(void)
 {
 #ifdef __HAIKU__
-	if (g_pci == NULL) {
-		status_t st = get_module(B_PCI_MODULE_NAME, (module_info **)&g_pci);
-		if (st != B_OK)
-			return st;
-	}
+	status_t st = get_module(B_PCI_MODULE_NAME, (module_info **)&g_pci);
+	if (st != B_OK)
+		return st;
 #endif
 	status_t st = detect_pci();
 #ifdef __HAIKU__
-	if (g_pci != NULL) {
-		put_module(B_PCI_MODULE_NAME);
-		g_pci = NULL;
+	if (st != B_OK) {
+		if (g_pci != NULL) {
+			put_module(B_PCI_MODULE_NAME);
+			g_pci = NULL;
+		}
+	} else {
+		/* Keep PCI module for later use (PCI config reads) */
 	}
 #endif
 	if (st != B_OK) {
@@ -631,19 +663,21 @@ status_t init_hardware(void)
 
 status_t init_driver(void)
 {
-#ifdef __HAIKU__
-	if (g_pci == NULL) {
-		status_t st = get_module(B_PCI_MODULE_NAME, (module_info **)&g_pci);
-		if (st != B_OK)
-			return st;
-	}
-#endif
 	if (g_info.device_id == 0) {
+#ifdef __HAIKU__
+		if (g_pci == NULL) {
+			status_t st = get_module(B_PCI_MODULE_NAME, (module_info **)&g_pci);
+			if (st != B_OK)
+				return st;
+		}
+#endif
 		status_t st = detect_pci();
 		if (st != B_OK) {
 #ifdef __HAIKU__
-			put_module(B_PCI_MODULE_NAME);
-			g_pci = NULL;
+			if (g_pci != NULL) {
+				put_module(B_PCI_MODULE_NAME);
+				g_pci = NULL;
+			}
 #endif
 			return st;
 		}
@@ -671,6 +705,12 @@ void uninit_driver(void)
 	memset(&g_info, 0, sizeof(g_info));
 	g_mmio = NULL;
 	RG_LOG("driver descargado");
+}
+
+/* Public API for server to clone helper areas into client address space */
+status_t rg_helper_clone_area(area_id kernel_area, const char *name, void **user_addr)
+{
+	return clone_area_for_user(kernel_area, name, user_addr);
 }
 
 const char **publish_devices(void)

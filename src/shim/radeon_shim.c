@@ -77,6 +77,64 @@ static rg_transport_fn g_transport;
 static uint32_t g_team = 1;
 static int g_next_fd = 100;
 
+/* Haiku BPort transport */
+#ifdef __HAIKU__
+static port_id g_client_port = -1;
+static port_id g_server_port = -1;
+static thread_id g_port_thread = -1;
+
+static int32_t bport_call(uint32_t msg, const void *payload, uint32_t payload_size,
+	void *reply, uint32_t reply_size)
+{
+	if (g_client_port < 0 || g_server_port < 0)
+		return RG_ENODEV;
+	
+	/* Build message with header + payload */
+	rg_hdr hdr;
+	hdr.magic = RG_IPC_MAGIC;
+	hdr.version = RG_IPC_VERSION;
+	hdr.msg = msg;
+	hdr.size = payload_size;
+	hdr.team_id = g_team;
+	hdr.seq = 0; /* No sequence tracking in BPort for simplicity */
+	
+	/* Send request */
+	status_t st = write_port(g_server_port, msg, &hdr, sizeof(hdr));
+	if (st != B_OK)
+		return (int32_t)st;
+	if (payload_size > 0) {
+		st = write_port(g_server_port, 0, payload, payload_size);
+		if (st != B_OK)
+			return (int32_t)st;
+	}
+	
+	/* Receive reply */
+	int32_t code;
+	size_t reply_len = reply_size;
+	st = read_port(g_client_port, &code, reply, reply_size);
+	if (st != B_OK)
+		return (int32_t)st;
+	
+	return (int32_t)st;
+}
+
+/* Port listener thread */
+static int32 bport_listener(void *arg)
+{
+	(void)arg;
+	while (g_client_port >= 0) {
+		int32_t code;
+		char buf[4096];
+		size_t len = sizeof(buf);
+		status_t st = read_port(g_client_port, &code, buf, len);
+		if (st < B_OK)
+			continue;
+		/* Async replies not implemented yet - server uses synchronous RPC */
+	}
+	return B_OK;
+}
+#endif
+
 void rg_shim_set_transport(rg_transport_fn fn) { g_transport = fn; }
 void rg_shim_set_team(uint32_t team) { g_team = team; }
 
@@ -93,6 +151,43 @@ int rg_shim_team_for_fd(int fd)
 	(void)fd;
 	return (int)g_team;
 }
+
+#ifdef __HAIKU__
+status_t rg_shim_setup_bport_transport(const char *server_port_name)
+{
+	if (server_port_name == NULL)
+		return B_BAD_VALUE;
+	
+	/* Create client port for replies */
+	g_client_port = create_port(32, "radeon_shim_client");
+	if (g_client_port < 0)
+		return g_client_port;
+	
+	/* Find server port */
+	port_info pinfo;
+	status_t st = get_port_info(server_port_name, &pinfo);
+	if (st != B_OK) {
+		delete_port(g_client_port);
+		g_client_port = -1;
+		return st;
+	}
+	g_server_port = pinfo.port;
+	
+	/* Set transport to BPort implementation */
+	g_transport = bport_call;
+	
+	/* Start listener thread for async notifications */
+	g_port_thread = spawn_kernel_thread(bport_listener, "radeon_shim_port", B_NORMAL_PRIORITY, NULL);
+	if (g_port_thread < 0) {
+		delete_port(g_client_port);
+		g_client_port = -1;
+		return g_port_thread;
+	}
+	resume_thread(g_port_thread);
+	
+	return B_OK;
+}
+#endif
 
 static int32_t call(uint32_t msg, const void *payload, uint32_t payload_size,
 	void *reply, uint32_t reply_size)
@@ -234,8 +329,16 @@ int drmIoctl(int fd, unsigned long request, void *arg)
 
 void *drmMmap(int fd, void *addr, size_t length, int prot, int flags, int64_t offset)
 {
-	(void)fd; (void)addr; (void)length; (void)prot; (void)flags; (void)offset;
-	/* En Haiku: clone_area / map_bo. En el host, el winsys ya obtuvo el
-	 * puntero por GEM_MMAP. */
+	(void)addr; (void)prot; (void)flags; (void)offset;
+	
+#ifdef __HAIKU__
+	/* In Haiku, the BO area is already cloned by the server.
+	 * The shim needs to get the area_id from the BO handle and clone it.
+	 * For now, return NULL - the winsys should use GEM_MMAP to get the mapping. */
+	(void)fd; (void)length;
 	return NULL;
+#else
+	(void)fd; (void)length;
+	return NULL;
+#endif
 }

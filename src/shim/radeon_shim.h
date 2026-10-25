@@ -21,7 +21,20 @@ typedef int32_t area_id;
 typedef int32_t (*rg_transport_fn)(uint32_t team, uint32_t msg,
 	const void *payload, uint32_t payload_size, void *reply, uint32_t reply_size);
 
+/* Haiku BPort transport context */
+#ifdef __HAIKU__
+#include <Port.h>
+typedef struct {
+	port_id server_port;
+	port_id client_port;
+} rg_bport_transport_t;
+#endif
+
 void rg_shim_set_transport(rg_transport_fn fn);
+#ifdef __HAIKU__
+/* Set up BPort transport - creates client port, connects to server */
+status_t rg_shim_setup_bport_transport(const char *server_port_name);
+#endif
 
 /* Identifica al cliente (team_id). Sin llamar, se usa 1. */
 void rg_shim_set_team(uint32_t team);

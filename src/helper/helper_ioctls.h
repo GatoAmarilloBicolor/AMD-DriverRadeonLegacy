@@ -107,6 +107,13 @@ typedef struct rg_pci_cfg_request {
 	uint8_t  data[256];
 } rg_pci_cfg_request;
 
+#ifndef __HAIKU__
+typedef int32_t status_t;
+#endif
+
+/* Clone kernel area into userland (server clones helper areas for clients) */
+status_t rg_helper_clone_area(int32_t kernel_area, const char *name, void **user_addr);
+
 #ifdef __cplusplus
 }
 #endif
