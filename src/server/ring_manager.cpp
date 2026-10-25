@@ -4,8 +4,48 @@
 #include "ring_manager.h"
 #include "radeon_hardening.h"
 #include <chrono>
+#include <cstdlib>
 
 RingManager::RingManager() = default;
+
+void *RingManager::allocate_fence_slot()
+{
+	std::lock_guard<std::mutex> guard(fFenceLock);
+	for (auto &slot : fFenceSlots) {
+		if (!slot.in_use) {
+			slot.in_use = true;
+			return slot.cpu_addr;
+		}
+	}
+	// Allocate new slot (host simulation: 8 bytes for uint64_t fence)
+	void *cpu_addr = std::malloc(8);
+	if (!cpu_addr)
+		return nullptr;
+	uint64_t gpu_addr = reinterpret_cast<uintptr_t>(cpu_addr); // Simulated
+	fFenceSlots.push_back({cpu_addr, gpu_addr, true});
+	return cpu_addr;
+}
+
+void RingManager::free_fence_slot(void *slot)
+{
+	std::lock_guard<std::mutex> guard(fFenceLock);
+	for (auto &s : fFenceSlots) {
+		if (s.cpu_addr == slot) {
+			s.in_use = false;
+			return;
+		}
+	}
+}
+
+uint64_t RingManager::slot_gpu_addr(void *slot) const
+{
+	std::lock_guard<std::mutex> guard(fFenceLock);
+	for (const auto &s : fFenceSlots) {
+		if (s.cpu_addr == slot)
+			return s.gpu_addr;
+	}
+	return 0;
+}
 
 int32_t RingManager::submit(rg_ring_id ring, const uint32_t *dwords, uint32_t count,
 	uint64_t *fence_out)

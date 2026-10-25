@@ -27,6 +27,9 @@ struct HostDeleter {
 };
 using HostPtr = std::unique_ptr<uint8_t[], HostDeleter>;
 
+/* Forward declaration */
+class IFenceAllocator;
+
 struct rg_bo {
 	uint32_t handle;
 	uint32_t team_id;
@@ -43,12 +46,12 @@ struct rg_bo {
 	uint64_t offset;       /* offset dentro del dominio (VRAM) o de la GTT */
 	int32_t  area;         /* area_id mapeada (o -1) */
 	HostPtr  host_ptr;     /* puntero CPU con RAII (simulado o mapeado) */
-	void    *fence_slot;   /* direccion GTT para fences, si aplica */
+	void    *fence_slot;   /* direccion GTT para fences, si aplica (owned by IFenceAllocator) */
 };
 
 class MemoryManager {
 public:
-	MemoryManager(uint64_t vram_size, uint64_t gart_size);
+	MemoryManager(uint64_t vram_size, uint64_t gart_size, IFenceAllocator *fence_alloc = nullptr);
 
 	/* Devuelve 0 en exito; handle/area/gpu_addr en *out. */
 	int32_t create_bo(uint32_t team, const rg_bo_create &req, rg_bo_reply *out);
@@ -62,6 +65,9 @@ public:
 
 	/* Consulta para el verificador de CS: solo si el BO es del cliente. */
 	const rg_bo *lookup(uint32_t team, uint32_t handle) const;
+
+	/* Fence allocator management */
+	void set_fence_allocator(IFenceAllocator *alloc) { fFenceAlloc = alloc; }
 
 	uint64_t vram_used() const { return fVramUsed; }
 	uint64_t gart_used() const { return fGartUsed; }
@@ -86,6 +92,8 @@ private:
 	uint64_t fClock = 1;
 	uint64_t fEvictions = 0;
 	int32_t  fNextArea = 1;
+
+	IFenceAllocator *fFenceAlloc = nullptr;
 
 	std::vector<Range> fVramFree;
 	std::vector<Range> fGartFree;

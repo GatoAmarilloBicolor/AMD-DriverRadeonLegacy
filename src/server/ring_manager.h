@@ -16,6 +16,15 @@
 
 #include "../common/rg_types.h"
 
+/* Interface for fence slot allocation (decouples MemoryManager from RingManager) */
+class IFenceAllocator {
+public:
+    virtual ~IFenceAllocator() = default;
+    virtual void *allocate_fence_slot() = 0;   // Returns GTT CPU address
+    virtual void free_fence_slot(void *slot) = 0;
+    virtual uint64_t slot_gpu_addr(void *slot) const = 0; // GPU-visible address
+};
+
 enum rg_ring_id {
 	RG_RING_GFX = 0,
 	RG_RING_CP_DMA = 1,
@@ -29,7 +38,7 @@ struct rg_ring_stats {
 	uint64_t resets;
 };
 
-class RingManager {
+class RingManager : public IFenceAllocator {
 public:
 	RingManager();
 
@@ -49,6 +58,11 @@ public:
 
 	const rg_ring_stats &stats(rg_ring_id ring) const { return fRings[ring].stats; }
 
+	// IFenceAllocator implementation
+	void *allocate_fence_slot() override;
+	void free_fence_slot(void *slot) override;
+	uint64_t slot_gpu_addr(void *slot) const override;
+
 	static constexpr int32_t kTimeout = -110;
 
 private:
@@ -59,9 +73,19 @@ private:
 		uint64_t done_fence = 0;
 		rg_ring_stats stats{};
 	};
+	struct FenceSlot {
+		void *cpu_addr;
+		uint64_t gpu_addr;
+		bool in_use = false;
+	};
+	
 	Ring fRings[RG_RING_COUNT];
 	mutable std::mutex fLock;
 	std::condition_variable fCv;
+	
+	// Fence slot pool (host simulation: just malloc)
+	std::vector<FenceSlot> fFenceSlots;
+	mutable std::mutex fFenceLock;
 };
 
 #endif /* RG_RING_MANAGER_H */

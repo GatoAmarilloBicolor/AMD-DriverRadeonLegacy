@@ -1,4 +1,5 @@
 #include "gart.h"
+#include "ring_manager.h"
 /*
  * memory_manager.cpp - Implementacion del gestor de BOs con soporte de Huge Pages (2MB+)
  */
@@ -45,8 +46,8 @@ void *host_alloc_aligned(size_t size, size_t align)
 void host_free(void *p) { (void)p; }
 #endif
 
-MemoryManager::MemoryManager(uint64_t vram_size, uint64_t gart_size)
-	: fVramSize(vram_size), fGartSize(gart_size)
+MemoryManager::MemoryManager(uint64_t vram_size, uint64_t gart_size, IFenceAllocator *fence_alloc)
+	: fVramSize(vram_size), fGartSize(gart_size), fFenceAlloc(fence_alloc)
 {
 	if (fVramSize == 0)
 		fVramSize = 256ull << 20;
@@ -261,6 +262,11 @@ int32_t MemoryManager::create_bo(uint32_t team, const rg_bo_create &req, rg_bo_r
 	}
 	bo.area = fNextArea++;
 
+	// Allocate fence slot if allocator is available (for GTT/VRAM BOs that may need fence writeback)
+	if (fFenceAlloc && (bo.domain == RG_DOMAIN_VRAM || bo.domain == RG_DOMAIN_GTT)) {
+		bo.fence_slot = fFenceAlloc->allocate_fence_slot();
+	}
+
 	fBos[bo.handle] = std::make_unique<rg_bo>(std::move(bo));
 
 	out->status = RG_OK;
@@ -363,6 +369,10 @@ int32_t MemoryManager::is_busy(uint32_t team, uint32_t handle, uint32_t *busy)
 void MemoryManager::destroy_bo(rg_bo &bo)
 {
 	bo.host_ptr.reset();  // RAII: automatically calls host_free
+	if (bo.fence_slot && fFenceAlloc) {
+		fFenceAlloc->free_fence_slot(bo.fence_slot);
+		bo.fence_slot = nullptr;
+	}
 	if (bo.domain == RG_DOMAIN_VRAM)
 		free_vram(bo.offset, bo.size);
 	else

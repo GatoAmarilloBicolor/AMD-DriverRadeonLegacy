@@ -15,7 +15,8 @@
 #include <signal.h>
 
 RgServer::RgServer(uint64_t vram_size, uint64_t gart_size)
-	: fMemory(vram_size, gart_size),
+	: fRings(),
+	  fMemory(vram_size, gart_size, &fRings),
 	  fVerifier(rg_policy_deny_all)
 {
 	fAsic = *rg_asic_lookup(0x9440, 0xFFFFFFFF, 0xFFFFFFFF); /* bring-up R600 */

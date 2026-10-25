@@ -76,8 +76,8 @@ private:
 
 	rg_team_state &team_state(uint32_t team);
 
+	RingManager fRings;  // Must be declared before fMemory for initialization order
 	MemoryManager fMemory;
-	RingManager fRings;
 	CsVerifier fVerifier;
 	VmidManager fVmids;
 	std::map<uint32_t, rg_team_state> fTeams;
