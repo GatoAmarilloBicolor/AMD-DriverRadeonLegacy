@@ -20,12 +20,6 @@
 #include "asic/rg_asic.h"
 #include "gcn/gpuvm.h"
 
-struct rg_team_state {
-	uint32_t vmid = 0;
-	bool has_vmid = false;
-	std::unique_ptr<GpuVm> vm;
-};
-
 /* Zero-allocation BO resolver for CsVerifier (implements IBoResolver) */
 class BoResolver : public CsVerifier::IBoResolver {
 public:
@@ -43,6 +37,49 @@ private:
 	uint32_t fTeam;
 };
 
+/* Policy registry for hot-swappable CS verification policies */
+class PolicyRegistry {
+public:
+	PolicyRegistry() { register_defaults(); }
+	
+	void register_policy(const std::string &name, const rg_cs_policy &policy) {
+		fPolicies[name] = policy;
+	}
+	
+	const rg_cs_policy *get_policy(const std::string &name) const {
+		auto it = fPolicies.find(name);
+		return (it != fPolicies.end()) ? &it->second : nullptr;
+	}
+	
+	void set_default(const std::string &name) {
+		if (fPolicies.find(name) != fPolicies.end())
+			fDefaultPolicy = name;
+	}
+	
+	const rg_cs_policy &default_policy() const {
+		auto it = fPolicies.find(fDefaultPolicy);
+		return it != fPolicies.end() ? it->second : rg_policy_deny_all;
+	}
+	
+private:
+	void register_defaults() {
+		fPolicies["deny-all"] = rg_policy_deny_all;
+		fPolicies["test"] = rg_policy_test;
+		fDefaultPolicy = "deny-all";
+	}
+	
+	std::map<std::string, rg_cs_policy> fPolicies;
+	std::string fDefaultPolicy;
+};
+
+/* Per-team state extended with policy selection */
+struct rg_team_state {
+	uint32_t vmid = 0;
+	bool has_vmid = false;
+	std::unique_ptr<GpuVm> vm;
+	std::string policy_name;  // Policy name from registry
+};
+
 class RgServer {
 public:
 	RgServer(uint64_t vram_size, uint64_t gart_size);
@@ -58,9 +95,14 @@ public:
 	RingManager &rings() { return fRings; }
 	CsVerifier &verifier() { return fVerifier; }
 	ILogger &logger() { return *fLogger; }
+	PolicyRegistry &policies() { return fPolicies; }
 
-	/* Politica activa: deny-all salvo que se instale la de test/produccion. */
-	void set_policy(const rg_cs_policy &policy) { fVerifier = CsVerifier(policy); }
+	/* Politica activa global: deny-all salvo que se instale la de test/produccion. */
+	void set_policy(const rg_cs_policy &policy) { 
+		fVerifier = CsVerifier(policy);
+		fPolicies.register_policy("runtime", policy);
+		fPolicies.set_default("runtime");
+	}
 
 	/* Priorización de tráfico IPC para app_server frente a tareas batch (Punto 15) */
 	bool is_high_priority_msg(uint32_t msg) const {
@@ -82,6 +124,7 @@ private:
 	MemoryManager fMemory;
 	CsVerifier fVerifier;
 	std::unique_ptr<ILogger> fLogger;
+	PolicyRegistry fPolicies;
 	VmidManager fVmids;
 	std::map<uint32_t, rg_team_state> fTeams;
 	std::mutex fTeamsLock;

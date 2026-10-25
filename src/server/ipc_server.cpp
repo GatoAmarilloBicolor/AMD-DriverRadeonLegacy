@@ -176,8 +176,15 @@ int32_t RgServer::handle_cs(uint32_t team, const void *payload,
 
 	BoResolver resolver(fMemory, team);
 
+	/* Get policy for this team (falls back to default) */
+	rg_team_state &tstate = team_state(team);
+	const rg_cs_policy *policy = fPolicies.get_policy(tstate.policy_name);
+	if (!policy)
+		policy = &fPolicies.default_policy();
+	CsVerifier team_verifier(*policy);
+
 	rg_verify_result vr;
-	int32_t st = fVerifier.verify(ib, cs->ib_dwords, relocs, cs->n_relocs,
+	int32_t st = team_verifier.verify(ib, cs->ib_dwords, relocs, cs->n_relocs,
 		static_cast<rg_family>(fAsic.family), resolver, &vr);
 	rep->status = st;
 	if (st != RG_OK)
