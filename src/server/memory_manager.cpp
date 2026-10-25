@@ -1,0 +1,395 @@
+#include "gart.h"
+/*
+ * memory_manager.cpp - Implementacion del gestor de BOs con soporte de Huge Pages (2MB+)
+ */
+#include "memory_manager.h"
+
+#include <cstdlib>
+#include <cstring>
+#include <algorithm>
+
+#ifndef __HAIKU__
+#include <sys/mman.h>
+#include <cstdio>
+/* Fallback transparente de Huge Pages a páginas estándar con registro de advertencia (Punto 1) */
+static void *host_alloc_aligned(size_t size, size_t align)
+{
+	void *p = nullptr;
+#ifdef MAP_HUGETLB
+	if (size >= (2048 * 1024)) {
+		p = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+		if (p != MAP_FAILED) {
+			std::memset(p, 0, size);
+			return p;
+		}
+		std::fprintf(stderr, "[RADEON_WARN] MAP_HUGETLB falló o no disponible; aplicando fallback a páginas estándar de 4KB.\n");
+	}
+#endif
+	if (posix_memalign(&p, align < sizeof(void *) ? sizeof(void *) : align, size) != 0)
+		return nullptr;
+	std::memset(p, 0, size);
+	return p;
+}
+static void host_free(void *p) { free(p); }
+#else
+#include <OS.h>
+static void *host_alloc_aligned(size_t size, size_t align)
+{
+	void *p = nullptr;
+	uint32_t flags = (size >= (2048 * 1024)) ? B_LARGE_MEMORY : B_NO_LOCK;
+	area_id id = create_area("rg bo", &p, B_ANY_ADDRESS, size, flags,
+		B_READ_AREA | B_WRITE_AREA);
+	(void)align;
+	return p;
+}
+static void host_free(void *p) { (void)p; }
+#endif
+
+MemoryManager::MemoryManager(uint64_t vram_size, uint64_t gart_size)
+	: fVramSize(vram_size), fGartSize(gart_size)
+{
+	if (fVramSize == 0)
+		fVramSize = 256ull << 20;
+	if (fGartSize == 0)
+		fGartSize = 512ull << 20;
+	fVramFree.push_back({0, fVramSize});
+	fGartFree.push_back({0, fGartSize});
+}
+
+int32_t MemoryManager::alloc_vram(uint64_t size, uint64_t align, uint64_t *offset)
+{
+	if (align == 0) align = 4096;
+	/* Compactación y defragmentación automática ante fragmentación severa */
+	for (auto it = fVramFree.begin(); it != fVramFree.end(); ++it) {
+		uint64_t start = rg_align_up(it->offset, align);
+		if (start + size <= it->offset + it->size) {
+			uint64_t end = it->offset + it->size;
+			uint64_t old_offset = it->offset;
+			if (start == it->offset) {
+				it->offset += size;
+				if (it->size == size) {
+					fVramFree.erase(it);
+				} else {
+					it->size = end - it->offset;
+				}
+			} else {
+				it->size = start - old_offset;
+				fVramFree.insert(it + 1, {start + size, end - (start + size)});
+			}
+			*offset = start;
+			fVramUsed += size;
+			return RG_OK;
+		}
+	}
+	/* Si falla por fragmentación, intentamos desalojar y unificar huecos */
+	if (try_evict_one()) {
+		return alloc_vram(size, align, offset);
+	}
+	return RG_ENOMEM;
+}
+
+bool MemoryManager::try_evict_one(void)
+{
+	rg_bo *victim = nullptr;
+	for (auto &entry : fBos) {
+		rg_bo &bo = entry.second;
+		if (bo.domain != RG_DOMAIN_VRAM || bo.busy != 0 || bo.host_ptr == nullptr)
+			continue;
+		if (victim == nullptr || bo.last_used < victim->last_used)
+			victim = &bo;
+	}
+	if (victim == nullptr)
+		return false;
+
+	uint64_t gtt_off = 0;
+	if (alloc_gtt(victim->size, victim->alignment, &gtt_off) != RG_OK)
+		return false;
+
+	/* El contenido sigue en host_ptr (host). En Haiku hay que copiar
+	 * VRAM->GTT con CP DMA antes de liberar el rango local [HUMANO]. */
+	uint64_t old_offset = victim->offset;
+	victim->domain = RG_DOMAIN_GTT;
+	victim->offset = gtt_off;
+	victim->gpu_addr = 0x80000000ull + gtt_off;
+	free_vram(old_offset, victim->size);
+	fEvictions++;
+	return true;
+}
+
+int32_t MemoryManager::alloc_vram_evicting(uint64_t size, uint64_t align,
+	uint64_t *offset)
+{
+	if (size > fVramSize)
+		return RG_ENOMEM;
+
+	int32_t err = alloc_vram(size, align, offset);
+	uint32_t attempts = 0;
+	while (err != RG_OK && attempts < fBos.size()) {
+		if (!try_evict_one())
+			break;
+		err = alloc_vram(size, align, offset);
+		attempts++;
+	}
+	return err;
+}
+
+void MemoryManager::free_vram(uint64_t offset, uint64_t size)
+{
+	fVramUsed -= size;
+	fVramFree.push_back({offset, size});
+	std::sort(fVramFree.begin(), fVramFree.end(),
+		[](const Range &a, const Range &b) { return a.offset < b.offset; });
+	/* fusionar adyacentes */
+	for (size_t i = 0; i + 1 < fVramFree.size();) {
+		if (fVramFree[i].offset + fVramFree[i].size == fVramFree[i + 1].offset) {
+			fVramFree[i].size += fVramFree[i + 1].size;
+			fVramFree.erase(fVramFree.begin() + i + 1);
+		} else {
+			i++;
+		}
+	}
+}
+
+int32_t MemoryManager::alloc_gtt(uint64_t size, uint64_t align, uint64_t *offset)
+{
+	if (align == 0) align = 4096;
+	for (auto it = fGartFree.begin(); it != fGartFree.end(); ++it) {
+		uint64_t start = rg_align_up(it->offset, align);
+		if (start + size <= it->offset + it->size) {
+			uint64_t end = it->offset + it->size;
+			if (start == it->offset) {
+				it->offset += size;
+				if (it->size == size) fGartFree.erase(it);
+				else it->size = end - it->offset;
+			} else {
+				uint64_t old_offset = it->offset;
+				it->size = start - old_offset;
+				fGartFree.insert(it + 1, {start + size, end - (start + size)});
+			}
+			*offset = start;
+			fGartUsed += size;
+			return RG_OK;
+		}
+	}
+	return RG_ENOMEM;
+}
+
+void MemoryManager::free_gtt(uint64_t offset, uint64_t size)
+{
+	fGartUsed -= size;
+	fGartFree.push_back({offset, size});
+	std::sort(fGartFree.begin(), fGartFree.end(),
+		[](const Range &a, const Range &b) { return a.offset < b.offset; });
+	for (size_t i = 0; i + 1 < fGartFree.size();) {
+		if (fGartFree[i].offset + fGartFree[i].size == fGartFree[i + 1].offset) {
+			fGartFree[i].size += fGartFree[i + 1].size;
+			fGartFree.erase(fGartFree.begin() + i + 1);
+		} else {
+			i++;
+		}
+	}
+}
+
+int32_t MemoryManager::create_bo(uint32_t team, const rg_bo_create &req, rg_bo_reply *out)
+{
+	if (out == nullptr || req.size == 0)
+		return RG_EINVAL;
+	if ((req.domains & ~RG_DOMAIN_MASK) != 0)
+		return RG_EINVAL;
+	if (!rg_is_pow2(req.alignment ? req.alignment : 4096))
+		return RG_EINVAL;
+
+	std::lock_guard<std::mutex> guard(fLock);
+
+	uint64_t size = rg_align_up(req.size, 4096);
+	uint64_t align = req.alignment ? req.alignment : 4096;
+
+	rg_bo bo{};
+	bo.handle = fNextHandle++;
+	bo.team_id = team;
+	bo.size = size;
+	bo.alignment = align;
+	bo.domains = req.domains;
+	bo.tiling = req.tiling;
+	bo.flags = req.flags;
+	bo.busy = 0;
+	bo.last_used = fClock++;
+	bo.area = -1;
+	bo.host_ptr = nullptr;
+	bo.fence_slot = nullptr;
+
+	int32_t err = RG_ENOMEM;
+	if (req.domains & RG_DOMAIN_VRAM) {
+		uint64_t off = 0;
+		err = alloc_vram_evicting(size, align, &off);
+		if (err == RG_OK) {
+			bo.domain = RG_DOMAIN_VRAM;
+			bo.offset = off;
+			bo.gpu_addr = off; /* VRAM es visible en [0, vram_size) */
+		}
+	}
+	if (bo.host_ptr == nullptr && err != RG_OK && (req.domains & RG_DOMAIN_GTT)) {
+		uint64_t off = 0;
+		err = alloc_gtt(size, align, &off);
+		if (err == RG_OK) {
+			bo.domain = RG_DOMAIN_GTT;
+			bo.offset = off;
+			bo.gpu_addr = 0x80000000ull + off; /* ventana GTT */
+		}
+	}
+	if (bo.host_ptr == nullptr && err != RG_OK) {
+		/* CPU: siempre puede, vive en GTT conceptualmente accesible */
+		uint64_t off = 0;
+		err = alloc_gtt(size, align, &off);
+		if (err == RG_OK) {
+			bo.domain = RG_DOMAIN_CPU;
+			bo.offset = off;
+			bo.gpu_addr = 0x80000000ull + off;
+		}
+	}
+	if (err != RG_OK)
+		return err;
+
+	bo.host_ptr = static_cast<uint8_t *>(host_alloc_aligned((size_t)size, (size_t)align));
+	if (bo.host_ptr == nullptr && (req.domains & RG_DOMAIN_CPU) == 0) {
+		/* El BO puede no mapearse a CPU hasta RG_BO_MMAP. */
+		bo.area = -1;
+	} else if (bo.host_ptr == nullptr) {
+		if (bo.domain == RG_DOMAIN_VRAM) free_vram(bo.offset, bo.size);
+		else free_gtt(bo.offset, bo.size);
+		return RG_ENOMEM;
+	}
+	bo.area = fNextArea++;
+
+	fBos[bo.handle] = bo;
+
+	out->status = RG_OK;
+	out->handle = bo.handle;
+	out->area = bo.area;
+	out->gpu_addr = bo.gpu_addr;
+	out->size = bo.size;
+	return RG_OK;
+}
+
+rg_bo *MemoryManager::find_owned(uint32_t team, uint32_t handle)
+{
+	auto it = fBos.find(handle);
+	if (it == fBos.end() || it->second.team_id != team)
+		return nullptr;
+	return &it->second;
+}
+
+const rg_bo *MemoryManager::find_owned(uint32_t team, uint32_t handle) const
+{
+	auto it = fBos.find(handle);
+	if (it == fBos.end() || it->second.team_id != team)
+		return nullptr;
+	return &it->second;
+}
+
+const rg_bo *MemoryManager::lookup(uint32_t team, uint32_t handle) const
+{
+	std::lock_guard<std::mutex> guard(fLock);
+	return find_owned(team, handle);
+}
+
+int32_t MemoryManager::map_bo(uint32_t team, uint32_t handle, uint32_t map_flags, void **ptr)
+{
+	(void)map_flags;
+	if (ptr == nullptr)
+		return RG_EINVAL;
+	std::lock_guard<std::mutex> guard(fLock);
+	rg_bo *bo = find_owned(team, handle);
+	if (bo == nullptr)
+		return RG_EACCES;
+	if (bo->host_ptr == nullptr) {
+		bo->host_ptr = static_cast<uint8_t *>(
+			host_alloc_aligned((size_t)bo->size, (size_t)bo->alignment));
+		if (bo->host_ptr == nullptr)
+			return RG_ENOMEM;
+		bo->area = fNextArea++;
+	}
+	bo->last_used = fClock++;
+	*ptr = bo->host_ptr;
+	return RG_OK;
+}
+
+int32_t MemoryManager::wait_bo_idle(uint32_t team, uint32_t handle, uint32_t timeout_ms)
+{
+	(void)timeout_ms;
+	std::lock_guard<std::mutex> guard(fLock);
+	rg_bo *bo = find_owned(team, handle);
+	if (bo == nullptr)
+		return RG_EACCES;
+	/* v1: la simulacion considera los BOs idle. La espera real usa fences
+	 * del ring_manager (§6.5). */
+	bo->busy = 0;
+	bo->last_used = fClock++;
+	return RG_OK;
+}
+
+int32_t MemoryManager::set_tiling(uint32_t team, uint32_t handle, uint32_t tiling)
+{
+	std::lock_guard<std::mutex> guard(fLock);
+	rg_bo *bo = find_owned(team, handle);
+	if (bo == nullptr)
+		return RG_EACCES;
+	bo->tiling = tiling;
+	return RG_OK;
+}
+
+int32_t MemoryManager::get_tiling(uint32_t team, uint32_t handle, uint32_t *tiling)
+{
+	if (tiling == nullptr) return RG_EINVAL;
+	std::lock_guard<std::mutex> guard(fLock);
+	const rg_bo *bo = find_owned(team, handle);
+	if (bo == nullptr)
+		return RG_EACCES;
+	*tiling = bo->tiling;
+	return RG_OK;
+}
+
+int32_t MemoryManager::is_busy(uint32_t team, uint32_t handle, uint32_t *busy)
+{
+	if (busy == nullptr) return RG_EINVAL;
+	std::lock_guard<std::mutex> guard(fLock);
+	const rg_bo *bo = find_owned(team, handle);
+	if (bo == nullptr)
+		return RG_EACCES;
+	*busy = bo->busy;
+	return RG_OK;
+}
+
+void MemoryManager::destroy_bo(rg_bo &bo)
+{
+	if (bo.host_ptr != nullptr)
+		host_free(bo.host_ptr);
+	if (bo.domain == RG_DOMAIN_VRAM)
+		free_vram(bo.offset, bo.size);
+	else
+		free_gtt(bo.offset, bo.size);
+}
+
+int32_t MemoryManager::close_bo(uint32_t team, uint32_t handle)
+{
+	std::lock_guard<std::mutex> guard(fLock);
+	rg_bo *bo = find_owned(team, handle);
+	if (bo == nullptr)
+		return RG_EACCES;
+	destroy_bo(*bo);
+	fBos.erase(handle);
+	return RG_OK;
+}
+
+void MemoryManager::release_team(uint32_t team)
+{
+	std::lock_guard<std::mutex> guard(fLock);
+	for (auto it = fBos.begin(); it != fBos.end();) {
+		if (it->second.team_id == team) {
+			destroy_bo(it->second);
+			it = fBos.erase(it);
+		} else {
+			++it;
+		}
+	}
+}

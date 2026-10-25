@@ -1,0 +1,30 @@
+# Helper de kernel para Haiku (C1 / Fase 1).
+#
+# Produccion: se integra en el radeon_hd nativo (ADR-004), que ya posee
+# modesetting/AtomBIOS; publica graphics/radeon_hd.
+#
+# Desarrollo aislado:
+#   jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy -sRG_STANDALONE=1
+# publica graphics/radeon_legacy y no colisiona con el driver nativo.
+#
+# Uso (desde el arbol de Haiku):
+#   jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy radeon_hd
+
+SubDir HAIKU_TOP src add-ons kernel drivers graphics radeon_hd ;
+
+if $(RG_REPO) = "" {
+	Echo "RG_REPO no definido: jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy" ;
+	Exit 1 ;
+}
+
+UsePrivateKernelHeaders ;
+
+SEARCH on [ FGristFiles radeon_hd.c ] = [ FDirName $(RG_REPO) src helper ] ;
+
+_rg_module = radeon_hd ;
+if $(RG_STANDALONE) = 1 {
+	_rg_module = radeon_legacy ;
+	SubDirCcFlags -DRG_STANDALONE_HELPER ;
+}
+
+KernelAddon $(_rg_module) : radeon_hd.c ;

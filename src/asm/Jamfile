@@ -1,0 +1,28 @@
+# Kernels de ensamblador (C7 / Fase A2-A3).
+#
+# La seleccion de arquitectura usa TARGET_ARCH del build de Haiku.
+# [VERIFICAR] el nombre exacto de la variable en la version de Haiku usada.
+
+SubDir HAIKU_TOP src libs librg_asm ;
+
+if $(RG_REPO) = "" {
+	Echo "RG_REPO no definido: jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy" ;
+	Exit 1 ;
+}
+
+SEARCH on [ FGristFiles rg_asm_ref.c ] =
+	[ FDirName $(RG_REPO) src asm common ] ;
+
+_rg_archSources = rg_asm_ref.c ;
+if $(TARGET_ARCH) = x86_64 {
+	SEARCH on [ FGristFiles format_convert_sse2.S ] =
+		[ FDirName $(RG_REPO) src asm x86 ] ;
+	_rg_archSources += format_convert_sse2.S ;
+}
+if $(TARGET_ARCH) = arm64 || $(TARGET_ARCH) = arm {
+	SEARCH on [ FGristFiles detile_neon.S ] =
+		[ FDirName $(RG_REPO) src asm arm ] ;
+	_rg_archSources += detile_neon.S ;
+}
+
+StaticLibrary librg_asm.a : $(_rg_archSources) ;

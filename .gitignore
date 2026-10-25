@@ -1,0 +1,8 @@
+build/
+*.o
+*.d
+*.a
+radeon_gpud
+rg_asm_check
+rg_test
+test_asm_check

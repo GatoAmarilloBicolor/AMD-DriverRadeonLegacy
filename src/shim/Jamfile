@@ -1,0 +1,16 @@
+# Shims DRM (C3 / Fase 5). Se enlazan con Mesa/HaikuPorts; no son drivers.
+#
+# Uso: jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy libdrm_haiku.so
+
+SubDir HAIKU_TOP src libs libdrm_haiku ;
+
+if $(RG_REPO) = "" {
+	Echo "RG_REPO no definido: jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy" ;
+	Exit 1 ;
+}
+
+SEARCH on [ FGristFiles radeon_shim.c amdgpu_shim.c ] =
+	[ FDirName $(RG_REPO) src shim ] ;
+
+SharedLibrary libdrm_haiku.so : radeon_shim.c ;
+SharedLibrary libdrm_amdgpu.so : amdgpu_shim.c ;

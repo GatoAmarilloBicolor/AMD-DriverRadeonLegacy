@@ -1,0 +1,39 @@
+# radeon_gpud - servidor GPU en userland (C2 / Fase 2).
+#
+# Uso desde el arbol de Haiku:
+#   jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy radeon_gpud
+#
+# El transporte BPort sustituye al de prueba del host en la fase de
+# integracion Haiku [HUMANO]. Por ahora el binario compila y corre --selftest.
+
+SubDir HAIKU_TOP src apps radeon_gpud ;
+
+if $(RG_REPO) = "" {
+	Echo "RG_REPO no definido: jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy" ;
+	Exit 1 ;
+}
+
+_rg_serverDir = [ FDirName $(RG_REPO) src server ] ;
+_rg_asicDir = [ FDirName $(RG_REPO) src server asic ] ;
+_rg_legacyDir = [ FDirName $(RG_REPO) src server legacy ] ;
+_rg_gcnDir = [ FDirName $(RG_REPO) src server gcn ] ;
+
+SEARCH on [ FGristFiles main.cpp memory_manager.cpp gart.cpp cs_verifier.cpp
+	ring_manager.cpp firmware.cpp ipc_server.cpp ] = $(_rg_serverDir) ;
+SEARCH on [ FGristFiles rg_asic.cpp ] = $(_rg_asicDir) ;
+SEARCH on [ FGristFiles rg_legacy.cpp ] = $(_rg_legacyDir) ;
+SEARCH on [ FGristFiles gpuvm.cpp ip_blocks.cpp ] = $(_rg_gcnDir) ;
+
+Application radeon_gpud :
+	main.cpp
+	memory_manager.cpp
+	gart.cpp
+	cs_verifier.cpp
+	ring_manager.cpp
+	firmware.cpp
+	ipc_server.cpp
+	rg_asic.cpp
+	rg_legacy.cpp
+	gpuvm.cpp
+	ip_blocks.cpp
+	;
