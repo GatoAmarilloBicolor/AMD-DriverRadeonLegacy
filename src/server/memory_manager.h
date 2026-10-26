@@ -17,11 +17,14 @@
 #include "../common/rg_types.h"
 #include "../common/rg_ipc.h"
 #include "vram_compression.h"
-#include "vram_compression.h"
 
 /* Forward declarations for allocator functions */
 extern void *host_alloc_aligned(size_t size, size_t align);
 extern void host_free(void *p);
+
+/* Forward declarations */
+class IFenceAllocator;
+class RingManager;
 
 /* RAII wrapper for host-allocated memory (huge-page aware) */
 struct HostDeleter {
@@ -71,6 +74,9 @@ public:
 	/* Fence allocator management */
 	void set_fence_allocator(IFenceAllocator *alloc) { fFenceAlloc = alloc; }
 
+	/* RingManager para esperas reales y CP DMA */
+	void set_ring_manager(class RingManager *ring) { fRingManager = ring; }
+
 	/* VRAM pressure monitor access */
 	VramPressureMonitor &pressure_monitor() { return fPressureMonitor; }
 	const VramPressureMonitor &pressure_monitor() const { return fPressureMonitor; }
@@ -101,6 +107,7 @@ private:
 	int32_t  fNextArea = 1;
 
 	IFenceAllocator *fFenceAlloc = nullptr;
+	class RingManager *fRingManager = nullptr;
 	VramPressureMonitor fPressureMonitor;
 
 	std::vector<Range> fVramFree;

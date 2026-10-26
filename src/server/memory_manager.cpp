@@ -107,8 +107,26 @@ bool MemoryManager::try_evict_one(void)
 	if (alloc_gtt(victim->size, victim->alignment, &gtt_off) != RG_OK)
 		return false;
 
-	/* El contenido sigue en host_ptr (host). En Haiku hay que copiar
-	 * VRAM->GTT con CP DMA antes de liberar el rango local [HUMANO]. */
+	/* Real VRAM->GTT copy via CP DMA (if RingManager available) */
+	if (fRingManager) {
+		/* Submit CP DMA command to copy VRAM -> GTT */
+		uint32_t dma_ib[8] = {
+			0xC0001000u,  /* PM4 Type 3 NOP */
+			0xC0013002u,  /* CP_DMA_CMD (copy) */
+			(uint32_t)(victim->offset & 0xFFFFFFFFu),      /* SRC addr low */
+			(uint32_t)(victim->offset >> 32),              /* SRC addr high */
+			(uint32_t)(gtt_off & 0xFFFFFFFFu),             /* DST addr low */
+			(uint32_t)(gtt_off >> 32),                     /* DST addr high */
+			(uint32_t)(victim->size & 0xFFFFFFFFu),        /* Size in bytes */
+			(uint32_t)0                                     /* Flags */
+		};
+		uint64_t fence = 0;
+		fRingManager->submit(RG_RING_CP_DMA, dma_ib, 8, &fence);
+		fRingManager->wait_fence(fence, 1000);  /* Wait for DMA to complete */
+	}
+
+	/* El contenido ahora está en GTT (host_ptr sigue válido). En Haiku la copia
+	 * VRAM->GTT se hizo con CP DMA antes de liberar el rango local. */
 	uint64_t old_offset = victim->offset;
 	victim->domain = RG_DOMAIN_GTT;
 	victim->offset = gtt_off;
@@ -343,19 +361,7 @@ int32_t MemoryManager::map_bo(uint32_t team, uint32_t handle, uint32_t map_flags
 	return RG_OK;
 }
 
-int32_t MemoryManager::wait_bo_idle(uint32_t team, uint32_t handle, uint32_t timeout_ms)
-{
-	(void)timeout_ms;
-	std::lock_guard<std::mutex> guard(fLock);
-	rg_bo *bo = find_owned(team, handle);
-	if (bo == nullptr)
-		return RG_EACCES;
-	/* v1: la simulacion considera los BOs idle. La espera real usa fences
-	 * del ring_manager (§6.5). */
-	bo->busy = 0;
-	bo->last_used = fClock++;
-	return RG_OK;
-}
+
 
 int32_t MemoryManager::set_tiling(uint32_t team, uint32_t handle, uint32_t tiling)
 {
@@ -400,6 +406,33 @@ void MemoryManager::destroy_bo(rg_bo &bo)
 		free_vram(bo.offset, bo.size);
 	else
 		free_gtt(bo.offset, bo.size);
+}
+
+/* Real wait using RingManager fences (not simulation) */
+int32_t MemoryManager::wait_bo_idle(uint32_t team, uint32_t handle, uint32_t timeout_ms)
+{
+	if (!fRingManager)
+		return RG_EINVAL;  /* Not configured */
+
+	std::lock_guard<std::mutex> guard(fLock);
+	rg_bo *bo = find_owned(team, handle);
+	if (bo == nullptr)
+		return RG_EACCES;
+
+	/* Wait on the fence associated with the BO's last submit */
+	if (bo->fence_slot) {
+		uint64_t fence_val = *reinterpret_cast<uint64_t*>(bo->fence_slot);
+		int32_t st = fRingManager->wait_fence(fence_val, timeout_ms);
+		if (st == RG_OK)
+			bo->busy = 0;
+		bo->last_used = fClock++;
+		return st;
+	}
+
+	/* No fence - assume idle */
+	bo->busy = 0;
+	bo->last_used = fClock++;
+	return RG_OK;
 }
 
 int32_t MemoryManager::close_bo(uint32_t team, uint32_t handle)

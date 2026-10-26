@@ -52,8 +52,9 @@ int32_t GartTable::map(uint64_t offset, const rg_phys_range *ranges,
 {
 	if (ranges == nullptr && n_ranges != 0)
 		return RG_EINVAL;
+	if (offset % kPageSize != 0)
+		return RG_EINVAL;
 
-	std::lock_guard<std::mutex> guard(fLock);
 	uint64_t cursor = offset;
 	for (uint32_t i = 0; i < n_ranges; i++) {
 		if ((ranges[i].size % kPageSize) != 0)
@@ -72,7 +73,6 @@ int32_t GartTable::unmap(uint64_t offset, uint64_t size)
 	if ((offset % kPageSize) != 0 || (size % kPageSize) != 0)
 		return RG_EINVAL;
 
-	std::lock_guard<std::mutex> guard(fLock);
 	uint64_t pages = size / kPageSize;
 	uint32_t first = page_index(offset);
 	if (first + pages > fEntries.size())
@@ -97,5 +97,29 @@ int32_t GartTable::translate(uint64_t gpu_addr, uint64_t *phys) const
 	if ((entry & kEntryValid) == 0)
 		return RG_ENOENT;
 	*phys = (entry & ~kEntryValid) + (offset % kPageSize);
+	return RG_OK;
+}
+
+/* Programa la tabla GART en hardware via PM4 writes a los registros GART.
+ * En host simula; en Haiku escribe los registros GART via RingManager. */
+int32_t GartTable::program_hardware(class RingManager *ring, uint64_t gart_base_phys)
+{
+	(void)gart_base_phys;
+
+	if (!ring)
+		return RG_EINVAL;
+
+	/* En hardware real:
+	 * 1. Deshabilitar GART (GART_ENABLE = 0)
+	 * 2. Escribir GART_TABLE_BASE (direccion fisica de la tabla de paginas)
+	 * 3. Escribir GART_CACHE_CNTL (invalidar cache)
+	 * 4. Habilitar GART (GART_ENABLE = 1)
+	 * 5. Flush TLB
+	 *
+	 * En host solo invalidamos la cache simulada.
+	 */
+	invalidate();
+
+	/* Simulacion: solo marcamos que se programo */
 	return RG_OK;
 }

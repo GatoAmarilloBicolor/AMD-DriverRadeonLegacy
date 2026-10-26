@@ -31,6 +31,10 @@ public:
 	/* Traduce una direccion GPU de la ventana GTT a fisica. */
 	int32_t translate(uint64_t gpu_addr, uint64_t *phys) const;
 
+	/* Programa la tabla GART en hardware via RingManager (PM4 writes to GART registers).
+	 * En host simula; en Haiku escribe los registros GART. */
+	int32_t program_hardware(class RingManager *ring, uint64_t gart_base_phys);
+
 	uint64_t size() const { return fSize; }
 	uint64_t gpu_base() const { return fGpuBase; }
 	uint32_t mapped_pages() const;
@@ -44,7 +48,7 @@ private:
 
 	uint64_t fSize;
 	uint64_t fGpuBase;
-	std::vector<uint64_t> fEntries; /* 0 = no mapeado */
+	std::vector<uint64_t> fEntries; /* 0 = no mapeada */
 	mutable std::mutex fLock;
 	uint32_t fFlushes = 0;
 };

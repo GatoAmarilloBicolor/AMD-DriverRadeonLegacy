@@ -20,11 +20,12 @@ static const rg_reg_rule kTestRegs[] = {
 	{ 0x2800, 0x28FF, RG_REG_FORBID }  /* memory controller: prohibido */
 };
 static const rg_op_rule kTestOps[] = {
-	{ 0x10, RG_OP_ALLOW },             /* NOP */
-	{ 0x14, RG_OP_ALLOW },             /* SET_CONFIG_REG (provisional) */
-	{ 0x15, RG_OP_ALLOW },             /* SET_CONTEXT_REG (provisional) */
-	{ 0x33, RG_OP_RELOC_ACCESS },      /* DRAW (provisional) */
-	{ 0x34, RG_OP_RELOC_ACCESS }       /* DRAW_INDEX (provisional) */
+	{ 0x10, RG_OP_ALLOW }, /* NOP */
+	{ 0x14, RG_OP_ALLOW }, /* SET_CONFIG_REG (provisional) */
+	{ 0x15, RG_OP_ALLOW }, /* SET_CONTEXT_REG (provisional) */
+	{ 0x2D, RG_OP_RELOC_ACCESS }, /* CP_DMA (real AMD PM4 opcode) */
+	{ 0x33, RG_OP_RELOC_ACCESS }, /* DRAW (provisional) */
+	{ 0x34, RG_OP_RELOC_ACCESS } /* DRAW_INDEX (provisional) */
 };
 const rg_cs_policy rg_policy_test = {
 	"test", kTestRegs, sizeof(kTestRegs) / sizeof(kTestRegs[0]),
@@ -32,7 +33,7 @@ const rg_cs_policy rg_policy_test = {
 };
 
 CsVerifier::CsVerifier(const rg_cs_policy &policy)
-	: fPolicy(&policy)
+	: fPolicy(&policy), fCache(std::make_unique<CsVerifyCache>())
 {
 }
 

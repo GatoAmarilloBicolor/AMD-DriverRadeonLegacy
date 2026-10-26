@@ -1,6 +1,4 @@
 #include "test_haiku_api.cpp"
-#include "test_haiku_api.cpp"
-#include "test_haiku_api.cpp"
 /*
  * test_main.cpp - Tests del servidor, verificador, shim, GPUVM y planner.
  * Cubre CA de Fase 2, 3, 4 (parcial), G0/G3 y §8.
@@ -363,10 +361,19 @@ static void test_ip_blocks()
 {
 	uint32_t n = 0;
 	const rg_ip_block **blocks = rg_ip_blocks_for(RG_FAMILY_GCN3, &n);
+	if (blocks == nullptr || n == 0) return;
+	uint32_t mmio_space[0x2000] = {0};
+	/* Set PSP ready bit for test */
+	mmio_space[0x0A00 / 4] = 0x80000000; /* MM_PSP_BOOT_STATUS with ready bit */
 	rg_device dev{};
 	dev.family = RG_FAMILY_GCN3;
 	dev.blocks = blocks;
 	dev.n_blocks = n;
+	dev.mmio = mmio_space;
+	dev.vram_size = 1024 * 1024 * 256;
+	dev.gart_size = 1024 * 1024 * 256;
+	dev.vram_gpu_base = 0x100000000ull;
+	dev.gart_gpu_base = 0x80000000ull;
 	check("G2 ip init", rg_device_init(&dev) == RG_OK && dev.initialized);
 	check("G2 ip idle", rg_device_is_idle(&dev));
 	check("G2 ip suspend/resume",

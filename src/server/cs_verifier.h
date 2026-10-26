@@ -16,6 +16,7 @@
 #include <vector>
 #include <functional>
 #include <type_traits>
+#include <mutex>
 
 #include "../common/rg_types.h"
 #include "../common/rg_ipc.h"
@@ -80,6 +81,111 @@ struct rg_verify_result {
 	std::vector<rg_bo_view> touched;
 };
 
+/* Fast-path cache entry for verified IBs */
+struct CsVerifyCacheEntry {
+    uint64_t ib_hash;           /* Hash of IB dwords */
+    uint64_t reloc_hash;        /* Hash of reloc table */
+    uint32_t dwords;
+    uint32_t n_relocs;
+    int32_t status;
+    std::vector<uint32_t> patched;
+    std::vector<rg_bo_view> touched;
+    uint64_t fence_base;        /* Base fence for this pattern */
+    uint32_t hit_count;
+};
+
+/* Fast-path cache for repeated IB patterns (LRU, max 64 entries) */
+class CsVerifyCache {
+public:
+    CsVerifyCache() = default;
+    
+    /* Try to find matching cached result. Returns true if found and valid. */
+    bool lookup(uint64_t ib_hash, uint64_t reloc_hash, uint32_t dwords, uint32_t n_relocs,
+                rg_verify_result *out, uint64_t next_fence) const;
+    
+    /* Insert verified result into cache */
+    void insert(uint64_t ib_hash, uint64_t reloc_hash, uint32_t dwords, uint32_t n_relocs,
+                const rg_verify_result &result, uint64_t next_fence);
+    
+    void clear() { fEntries.clear(); }
+    
+public:
+    static uint64_t hash_ib(const uint32_t *ib, uint32_t dwords);
+    static uint64_t hash_relocs(const rg_reloc *relocs, uint32_t n_relocs);
+    
+private:
+    mutable std::mutex fMutex;
+    std::vector<CsVerifyCacheEntry> fEntries;
+    static constexpr size_t kMaxEntries = 64;
+};
+
+/* Compute simple hash of IB dwords (FNV-1a) */
+inline uint64_t CsVerifyCache::hash_ib(const uint32_t *ib, uint32_t dwords) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < dwords; i++) {
+        h ^= ib[i];
+        h *= 0x100000001b3ull;
+    }
+    return h;
+}
+
+inline uint64_t CsVerifyCache::hash_relocs(const rg_reloc *relocs, uint32_t n_relocs) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (uint32_t i = 0; i < n_relocs; i++) {
+        const uint64_t *p = reinterpret_cast<const uint64_t*>(&relocs[i]);
+        for (size_t j = 0; j < sizeof(rg_reloc) / 8; j++) {
+            h ^= p[j];
+            h *= 0x100000001b3ull;
+        }
+    }
+    return h;
+}
+
+inline bool CsVerifyCache::lookup(uint64_t ib_hash, uint64_t reloc_hash, uint32_t dwords, uint32_t n_relocs,
+                           rg_verify_result *out, uint64_t next_fence) const {
+    std::lock_guard<std::mutex> guard(fMutex);
+    for (auto &entry : fEntries) {
+        if (entry.ib_hash == ib_hash && entry.reloc_hash == reloc_hash &&
+            entry.dwords == dwords && entry.n_relocs == n_relocs) {
+            /* Cache hit - copy cached result */
+            out->status = entry.status;
+            out->bad_dword = 0;
+            out->bad_opcode = 0;
+            out->bad_reg = 0;
+            out->fence = entry.fence_base + (next_fence - entry.fence_base);
+            out->patched = entry.patched;
+            out->touched = entry.touched;
+            /* Cannot increment hit_count in const method - skip for now */
+            return true;
+        }
+    }
+    return false;
+}
+
+inline void CsVerifyCache::insert(uint64_t ib_hash, uint64_t reloc_hash, uint32_t dwords, uint32_t n_relocs,
+                           const rg_verify_result &result, uint64_t next_fence) {
+    std::lock_guard<std::mutex> guard(fMutex);
+    
+    /* LRU eviction if full */
+    if (fEntries.size() >= kMaxEntries) {
+        size_t lru_idx = 0;
+        uint32_t min_hits = UINT32_MAX;
+        for (size_t i = 0; i < fEntries.size(); i++) {
+            if (fEntries[i].hit_count < min_hits) {
+                min_hits = fEntries[i].hit_count;
+                lru_idx = i;
+            }
+        }
+        fEntries[lru_idx] = {};
+    }
+    
+    fEntries.push_back({
+        ib_hash, reloc_hash, dwords, n_relocs,
+        result.status, result.patched, result.touched,
+        next_fence, 1
+    });
+}
+
 class CsVerifier {
 public:
 	/* Interface for BO resolution - eliminates std::function heap allocation in hot path */
@@ -106,6 +212,7 @@ public:
 
 private:
 	const rg_cs_policy *fPolicy;
+	std::unique_ptr<CsVerifyCache> fCache;
 	
 	// Common implementation
 	template<typename Resolver>
@@ -185,6 +292,16 @@ int32_t CsVerifier::verify_impl(const uint32_t *ib, uint32_t dwords,
 	/* Mitigación: Comprobación estricta de límites contra buffer overflows */
 	if (dwords > 1024 * 1024)
 		return RG_EINVAL;
+
+    /* Fast-path cache lookup */
+    uint64_t ib_hash = CsVerifyCache::hash_ib(ib, dwords);
+    uint64_t reloc_hash = CsVerifyCache::hash_relocs(relocs, n_relocs);
+    uint64_t next_fence = 0;  /* Will be filled by RingManager */
+    
+    if (fCache->lookup(ib_hash, reloc_hash, dwords, n_relocs, out, next_fence)) {
+        return out->status;
+    }
+
 	out->status = RG_OK;
 	out->bad_dword = 0;
 	out->bad_opcode = 0;
@@ -331,6 +448,10 @@ int32_t CsVerifier::verify_impl(const uint32_t *ib, uint32_t dwords,
 	}
 
 	out->status = RG_OK;
+
+    /* Insert into cache for future fast-path hits */
+    fCache->insert(ib_hash, reloc_hash, dwords, n_relocs, *out, next_fence);
+
 	return RG_OK;
 }
 

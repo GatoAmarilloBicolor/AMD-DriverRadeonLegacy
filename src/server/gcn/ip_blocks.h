@@ -52,6 +52,13 @@ struct rg_device {
 	const rg_ip_block **blocks;
 	uint32_t n_blocks;
 	int initialized;
+	
+	/* MMIO y memoria */
+	uint32_t *mmio;           /* Puntero a MMIO mapeado */
+	uint64_t vram_gpu_base;   /* Base GPU VRAM */
+	uint64_t gart_gpu_base;   /* Base GPU GTT */
+	uint64_t vram_size;
+	uint64_t gart_size;
 };
 
 /* Tablas por familia (punteros estaticos). */
