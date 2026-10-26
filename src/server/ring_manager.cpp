@@ -6,6 +6,13 @@
 #include <chrono>
 #include <cstdlib>
 
+#define ROCM_LOG_INFO 1
+#define ROCM_LOG_DEBUG 0
+
+#define ROCM_LOG(level, fmt, ...) \
+    do { fprintf(stderr, "[RING %s] " fmt "\n", \
+        (level == ROCM_LOG_INFO ? "INFO" : "DEBUG"), ##__VA_ARGS__); } while(0)
+
 RingManager::RingManager() = default;
 
 void *RingManager::allocate_fence_slot()
@@ -28,11 +35,13 @@ void *RingManager::allocate_fence_slot()
 
 void RingManager::free_fence_slot(void *slot)
 {
+	if (!slot)
+		return;
 	std::lock_guard<std::mutex> guard(fFenceLock);
 	for (auto &s : fFenceSlots) {
 		if (s.cpu_addr == slot) {
 			s.in_use = false;
-			return;
+			break;
 		}
 	}
 }
@@ -68,47 +77,37 @@ int32_t RingManager::submit(rg_ring_id ring, const uint32_t *dwords, uint32_t co
 	
 	rg_hardware_memory_barrier();
 	fCv.notify_all();
+	
 	return RG_OK;
-}
-
-void RingManager::drain()
-{
-	std::lock_guard<std::mutex> guard(fLock);
-	for (uint32_t i = 0; i < RG_RING_COUNT; i++) {
-		Ring &r = fRings[i];
-		while (!r.queue.empty()) {
-			r.done_fence = r.queue.front().fence;
-			r.queue.pop_front();
-			r.stats.completed++;
-		}
-	}
-	fCv.notify_all();
 }
 
 int32_t RingManager::wait_fence(uint64_t fence, uint32_t timeout_ms)
 {
+	if (fence == 0)
+		return RG_OK;
+	
 	std::unique_lock<std::mutex> lock(fLock);
-	auto done = [&]() {
-		for (uint32_t i = 0; i < RG_RING_COUNT; i++)
-			if (fRings[i].done_fence >= fence)
-				return true;
-		return false;
+	auto done = [this, fence]() {
+		for (uint32_t i = 0; i < RG_RING_COUNT; i++) {
+			/* Skip IH ring for fence waiting - it doesn't use fences */
+			if (i == RG_RING_IH)
+				continue;
+			/* Skip rings that have never had work submitted (next_fence == 1) */
+			if (fRings[i].next_fence == 1)
+				continue;
+			if (fRings[i].done_fence < fence)
+				return false;
+		}
+		return true;
 	};
-
+	
 	if (done())
 		return RG_OK;
-
-	lock.unlock();
-	drain();
-	lock.lock();
-
-	if (done())
-		return RG_OK;
-
+	
 	bool ok = fCv.wait_for(lock, std::chrono::milliseconds(timeout_ms), done);
 	if (ok)
 		return RG_OK;
-
+	
 	/* Mitigación de cuelgues (Punto 14): Disparo automático de soft_reset si el timeout expira */
 	for (uint32_t i = 0; i < RG_RING_COUNT; i++) {
 		fRings[i].stats.timeouts++;
@@ -138,13 +137,137 @@ int32_t RingManager::soft_reset()
 {
 	std::lock_guard<std::mutex> guard(fLock);
 	for (uint32_t i = 0; i < RG_RING_COUNT; i++) {
+		if (i == RG_RING_IH)
+			continue;
 		Ring &r = fRings[i];
 		/* Todo lo pendiente se considera perdido; la fence salta al ultimo
-		 * valor encolado para no bloquear a los clientes para siempre. */
+		 * valor encolado para no bloquear los clientes para siempre. */
 		r.done_fence = r.next_fence - 1;
 		r.queue.clear();
 		r.stats.resets++;
 	}
 	fCv.notify_all();
 	return RG_OK;
+}
+
+/* Simulacion: procesa todo lo pendiente (lo haria la GPU). */
+void RingManager::drain()
+{
+	std::lock_guard<std::mutex> guard(fLock);
+	for (uint32_t i = 0; i < RG_RING_COUNT; i++) {
+		if (i == RG_RING_IH)
+			continue;
+		Ring &r = fRings[i];
+		r.done_fence = r.next_fence - 1;
+		r.stats.completed += r.queue.size();
+		r.queue.clear();
+	}
+	fCv.notify_all();
+}
+
+/* =====================================================================
+ * IH (Interrupt Handler) Ring Management
+ * ===================================================================== */
+
+int32_t RingManager::ih_init(uint64_t gpu_addr, uint32_t size_dwords)
+{
+    if (size_dwords == 0 || (size_dwords & (size_dwords - 1)) != 0)
+        return RG_EINVAL;  /* Size must be power of 2 */
+
+    std::lock_guard<std::mutex> guard(fLock);
+    
+    /* Initialize IH ring buffer */
+    Ring &ih = fRings[RG_RING_IH];
+    ih.queue.clear();
+    ih.next_fence = 1;
+    ih.done_fence = 0;
+    
+    /* Store IH ring parameters */
+    ih.gpu_addr = gpu_addr;
+    ih.size_dwords = size_dwords;
+    ih.rptr = 0;
+    ih.wptr = 0;
+    
+    ROCM_LOG(ROCM_LOG_INFO, "IH ring initialized: gpu_addr=0x%llX, size=%u dwords",
+             gpu_addr, size_dwords);
+    
+    return RG_OK;
+}
+
+int32_t RingManager::ih_fini()
+{
+    std::lock_guard<std::mutex> guard(fLock);
+    
+    Ring &ih = fRings[RG_RING_IH];
+    ih.queue.clear();
+    ih.next_fence = 1;
+    ih.done_fence = 0;
+    ih.gpu_addr = 0;
+    ih.size_dwords = 0;
+    ih.rptr = 0;
+    ih.wptr = 0;
+    
+    return RG_OK;
+}
+
+uint32_t RingManager::ih_process(uint32_t max_entries)
+{
+    std::lock_guard<std::mutex> guard(fLock);
+    
+    Ring &ih = fRings[RG_RING_IH];
+    if (ih.size_dwords == 0)
+        return 0;
+    
+    /* In real hardware, we would read from the IH ring buffer at ih.gpu_addr
+     * and process interrupt entries. Here we simulate processing. */
+    
+    uint32_t processed = 0;
+    while (!ih.queue.empty() && processed < max_entries) {
+        ih.queue.pop_front();
+        processed++;
+    }
+    
+    /* Update RPTR */
+    ih.rptr = (ih.rptr + processed) % ih.size_dwords;
+    
+    return processed;
+}
+
+uint64_t RingManager::ih_get_rptr()
+{
+    std::lock_guard<std::mutex> guard(fLock);
+    return fRings[RG_RING_IH].rptr;
+}
+
+void RingManager::ih_set_rptr(uint32_t rptr)
+{
+    std::lock_guard<std::mutex> guard(fLock);
+    fRings[RG_RING_IH].rptr = rptr;
+}
+
+uint64_t RingManager::ih_get_wptr()
+{
+    std::lock_guard<std::mutex> guard(fLock);
+    Ring &ih = fRings[RG_RING_IH];
+    return ((uint64_t)ih.wptr_hi << 32) | ih.wptr_lo;
+}
+
+void RingManager::ih_set_wptr(uint64_t wptr)
+{
+    std::lock_guard<std::mutex> guard(fLock);
+    Ring &ih = fRings[RG_RING_IH];
+    ih.wptr_lo = (uint32_t)wptr;
+    ih.wptr_hi = (uint32_t)(wptr >> 32);
+}
+
+uint32_t RingManager::ih_get_wptr_lo()
+{
+    std::lock_guard<std::mutex> guard(fLock);
+    return fRings[RG_RING_IH].wptr_lo;
+}
+
+uint32_t RingManager::ih_get_wptr_hi()
+{
+    std::lock_guard<std::mutex> guard(fLock);
+    return fRings[RG_RING_IH].wptr_hi;
 }

@@ -293,7 +293,8 @@ int32_t MemoryManager::create_bo(uint32_t team, const rg_bo_create &req, rg_bo_r
 	bo.tiling = req.tiling;
 	bo.flags = req.flags;
 	bo.busy = 0;
-	bo.last_used = fClock++;
+	/* BUG-KERNEL-001 FIX: Usar fetch_add atómico */
+	bo.last_used = fClock.fetch_add(1, std::memory_order_relaxed);
 	bo.area = -1;
 	bo.host_ptr = nullptr;
 	bo.fence_slot = nullptr;
@@ -394,7 +395,8 @@ int32_t MemoryManager::map_bo(uint32_t team, uint32_t handle, uint32_t map_flags
 			return RG_ENOMEM;
 		bo->area = fNextArea++;
 	}
-	bo->last_used = fClock++;
+	/* BUG-KERNEL-001 FIX: Usar fetch_add atómico */
+	bo->last_used = fClock.fetch_add(1, std::memory_order_relaxed);
 	*ptr = bo->host_ptr.get();
 	return RG_OK;
 }
@@ -463,13 +465,15 @@ int32_t MemoryManager::wait_bo_idle(uint32_t team, uint32_t handle, uint32_t tim
 		int32_t st = fRingManager->wait_fence(fence_val, timeout_ms);
 		if (st == RG_OK)
 			bo->busy = 0;
-		bo->last_used = fClock++;
+		/* BUG-KERNEL-001 FIX: Usar fetch_add atómico */
+		bo->last_used = fClock.fetch_add(1, std::memory_order_relaxed);
 		return st;
 	}
 
 	/* No fence - assume idle */
 	bo->busy = 0;
-	bo->last_used = fClock++;
+	/* BUG-KERNEL-001 FIX: Usar fetch_add atómico */
+	bo->last_used = fClock.fetch_add(1, std::memory_order_relaxed);
 	return RG_OK;
 }
 
@@ -485,6 +489,89 @@ int32_t MemoryManager::close_bo(uint32_t team, uint32_t handle)
 		fBos.erase(it);
 	}
 	return RG_OK;
+}
+
+int32_t MemoryManager::migrate_bo(uint32_t team, uint32_t handle, uint32_t target_domain, uint64_t *new_gpu_addr)
+{
+	std::lock_guard<std::mutex> guard(fLock);
+	rg_bo *bo = find_owned(team, handle);
+	if (bo == nullptr)
+		return RG_EACCES;
+
+	if (bo->busy != 0)
+		return RG_EBUSY;
+
+	if (bo->domains == target_domain)
+		return RG_OK;
+
+	uint32_t src_domain = bo->domains;
+
+	if (src_domain == RG_DOMAIN_VRAM && target_domain == RG_DOMAIN_GTT) {
+		if (bo->host_ptr == nullptr)
+			return RG_EINVAL;
+
+		uint64_t gtt_off = 0;
+		if (alloc_gtt(bo->size, bo->alignment, &gtt_off) != RG_OK)
+			return RG_ENOMEM;
+
+		if (fRingManager) {
+			uint32_t dma_ib[8] = {
+				0xC0001000u, 0xC0013002u,
+				(uint32_t)(bo->offset & 0xFFFFFFFFu),
+				(uint32_t)(bo->offset >> 32),
+				(uint32_t)(gtt_off & 0xFFFFFFFFu),
+				(uint32_t)(gtt_off >> 32),
+				(uint32_t)(bo->size & 0xFFFFFFFFu),
+				(uint32_t)0
+			};
+			uint64_t fence = 0;
+			fRingManager->submit(RG_RING_CP_DMA, dma_ib, 8, &fence);
+			fRingManager->wait_fence(fence, 1000);
+		}
+
+		uint64_t old_offset = bo->offset;
+		bo->domains = RG_DOMAIN_GTT;
+		bo->offset = gtt_off;
+		bo->gpu_addr = 0x80000000ull + gtt_off;
+		if (new_gpu_addr) *new_gpu_addr = bo->gpu_addr;
+		free_vram(old_offset, bo->size);
+		fEvictions++;
+		update_pressure_state();
+		return RG_OK;
+	}
+
+	if (src_domain == RG_DOMAIN_GTT && target_domain == RG_DOMAIN_VRAM) {
+		uint64_t vram_off = 0;
+		if (alloc_vram(bo->size, bo->alignment, &vram_off) != RG_OK)
+			return RG_ENOMEM;
+
+		if (fRingManager && bo->host_ptr) {
+			uint32_t dma_ib[8] = {
+				0xC0001000u, 0xC0013002u,
+				(uint32_t)(bo->offset & 0xFFFFFFFFu),
+				(uint32_t)(bo->offset >> 32),
+				(uint32_t)(vram_off & 0xFFFFFFFFu),
+				(uint32_t)(vram_off >> 32),
+				(uint32_t)(bo->size & 0xFFFFFFFFu),
+				(uint32_t)0
+			};
+			uint64_t fence = 0;
+			fRingManager->submit(RG_RING_CP_DMA, dma_ib, 8, &fence);
+			fRingManager->wait_fence(fence, 1000);
+		}
+
+		uint64_t old_gtt_off = bo->offset;
+		bo->domains = RG_DOMAIN_VRAM;
+		bo->offset = vram_off;
+		bo->gpu_addr = vram_off;
+		if (new_gpu_addr) *new_gpu_addr = bo->gpu_addr;
+		free_gtt(old_gtt_off, bo->size);
+		fVramUsed += bo->size;
+		update_pressure_state();
+		return RG_OK;
+	}
+
+	return RG_EINVAL;
 }
 
 void MemoryManager::release_team(uint32_t team)

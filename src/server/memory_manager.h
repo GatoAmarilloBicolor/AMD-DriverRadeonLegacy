@@ -10,7 +10,9 @@
 #include <stdint.h>
 #include <memory>
 #include <mutex>
+#include <atomic>
 #include <map>
+#include <unordered_map>
 #include <set>
 #include <vector>
 
@@ -106,6 +108,9 @@ public:
 	uint32_t bo_count() const { return (uint32_t)fBos.size(); }
 	uint64_t evictions() const { return fEvictions; }
 
+	/* BO migration between domains (VRAM <-> GTT <-> CPU) */
+	int32_t migrate_bo(uint32_t team, uint32_t handle, uint32_t target_domain, uint64_t *new_gpu_addr);
+
 private:
 	struct Range { uint64_t offset, size; };
 	struct PoolState {
@@ -131,7 +136,8 @@ private:
 	uint64_t fVramSize, fGartSize;
 	uint64_t fVramUsed = 0, fGartUsed = 0;
 	uint32_t fNextHandle = 1;
-	uint64_t fClock = 1;
+	/* BUG-KERNEL-001 FIX: fClock atómico para evitar race conditions */
+	std::atomic<uint64_t> fClock{1};
 	uint64_t fEvictions = 0;
 	int32_t  fNextArea = 1;
 
@@ -146,7 +152,7 @@ private:
 
 	std::vector<Range> fVramFree;
 	std::vector<Range> fGartFree;
-	std::map<uint32_t, std::unique_ptr<rg_bo>> fBos;
+	std::unordered_map<uint32_t, std::unique_ptr<rg_bo>> fBos;
 };
 
 #endif /* RG_MEMORY_MANAGER_H */

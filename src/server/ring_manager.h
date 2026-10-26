@@ -14,21 +14,20 @@
 #include <deque>
 #include <vector>
 
-#include "../common/rg_types.h"
-
 /* Interface for fence slot allocation (decouples MemoryManager from RingManager) */
 class IFenceAllocator {
 public:
     virtual ~IFenceAllocator() = default;
     virtual void *allocate_fence_slot() = 0;   // Returns GTT CPU address
     virtual void free_fence_slot(void *slot) = 0;
-    virtual uint64_t slot_gpu_addr(void *slot) const = 0; // GPU-visible address
+    virtual uint64_t slot_gpu_addr(void *slot) const = 0;
 };
 
 enum rg_ring_id {
 	RG_RING_GFX = 0,
 	RG_RING_CP_DMA = 1,
-	RG_RING_COUNT = 2
+	RG_RING_IH = 2,        /* Interrupt Handler ring */
+	RG_RING_COUNT = 3
 };
 
 struct rg_ring_stats {
@@ -63,6 +62,17 @@ public:
 	void free_fence_slot(void *slot) override;
 	uint64_t slot_gpu_addr(void *slot) const override;
 
+	/* IH (Interrupt Handler) ring management */
+	int32_t ih_init(uint64_t gpu_addr, uint32_t size_dwords);
+	int32_t ih_fini();
+	uint32_t ih_process(uint32_t max_entries);
+	uint64_t ih_get_rptr();
+	void ih_set_rptr(uint32_t rptr);
+	uint64_t ih_get_wptr();
+	void ih_set_wptr(uint64_t wptr);
+	uint32_t ih_get_wptr_lo();
+	uint32_t ih_get_wptr_hi();
+
 	static constexpr int32_t kTimeout = -110;
 
 private:
@@ -72,11 +82,14 @@ private:
 		uint64_t next_fence = 1;
 		uint64_t done_fence = 0;
 		rg_ring_stats stats{};
-	};
-	struct FenceSlot {
-		void *cpu_addr;
-		uint64_t gpu_addr;
-		bool in_use = false;
+		
+		/* IH (Interrupt Handler) specific fields */
+		uint64_t gpu_addr = 0;
+		uint32_t size_dwords = 0;
+		uint32_t rptr = 0;
+		uint32_t wptr = 0;
+		uint32_t wptr_lo = 0;
+		uint32_t wptr_hi = 0;
 	};
 	
 	Ring fRings[RG_RING_COUNT];
@@ -84,6 +97,11 @@ private:
 	std::condition_variable fCv;
 	
 	// Fence slot pool (host simulation: just malloc)
+	struct FenceSlot {
+		void *cpu_addr;
+		uint64_t gpu_addr;
+		bool in_use = false;
+	};
 	std::vector<FenceSlot> fFenceSlots;
 	mutable std::mutex fFenceLock;
 };

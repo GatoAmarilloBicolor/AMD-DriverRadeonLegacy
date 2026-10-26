@@ -23,6 +23,8 @@
 #include "../src/shim/amdgpu_shim.h"
 #include "../src/lvp_hw/lvp_planner.h"
 #include "../src/lvp_hw/lvp_exec_cpu.h"
+#include "../src/shim/super_resolution.h"
+#include "../src/shim/dlss_nr.h"
 
 static int g_fail = 0;
 static int g_pass = 0;
@@ -159,6 +161,7 @@ static void test_ring()
 	uint32_t nop = 0xC0001000u;
 	uint64_t f = 0;
 	check("F4 submit", ring.submit(RG_RING_GFX, &nop, 1, &f) == RG_OK && f == 1);
+	ring.drain();
 	check("F4 wait", ring.wait_fence(f, 100) == RG_OK);
 	ring.submit(RG_RING_GFX, &nop, 1, &f);
 	check("F4 soft reset", ring.soft_reset() == RG_OK &&
@@ -396,6 +399,146 @@ static void test_ip_blocks()
 	check("G2 startup order", order, "GMC/IH antes de GFX");
 }
 
+/* ---------------- FSR 1.0 / DLSS-NR ---------------- */
+static void test_fsr1_dlss_nr()
+{
+	/* Test FSR 1.0 spatial upscaling */
+	{
+		const int src_w = 640, src_h = 480;
+		const int dst_w = 1280, dst_h = 960; /* 2x scale */
+		float *src = new float[src_w * src_h * 3];
+		float *dst = new float[dst_w * dst_h * 3];
+
+		/* Fill with gradient pattern */
+		for (int y = 0; y < src_h; ++y) {
+			for (int x = 0; x < src_w; ++x) {
+				int idx = (y * src_w + x) * 3;
+				src[idx + 0] = (float)x / src_w;
+				src[idx + 1] = (float)y / src_h;
+				src[idx + 2] = 0.5f;
+			}
+		}
+
+		struct sr_context sr{};
+		sr.algorithm = SR_ALG_FSR_1_SPATIAL;
+		sr.width = src_w;
+		sr.height = src_h;
+		sr.target_width = dst_w;
+		sr.target_height = dst_h;
+		sr.sharpness = 0.5f;
+
+		bool ok = sr_apply_upscale(&sr, src, dst);
+		check("FSR1 EASU+RCAS upscale 2x", ok);
+
+		/* Verify output is in bounds */
+		if (ok) {
+			bool in_bounds = true;
+			for (int i = 0; i < dst_w * dst_h * 3; ++i) {
+				if (dst[i] < 0.0f || dst[i] > 1.0f) { in_bounds = false; break; }
+			}
+			check("FSR1 output clamped [0,1]", in_bounds);
+		}
+
+		delete[] src;
+		delete[] dst;
+	}
+
+	/* Test FSR 1.0 with sharpness = 0 (no sharpening) */
+	{
+		const int src_w = 320, src_h = 240;
+		const int dst_w = 640, dst_h = 480;
+		float *src = new float[src_w * src_h * 3];
+		float *dst = new float[dst_w * dst_h * 3];
+
+		for (int y = 0; y < src_h; ++y) {
+			for (int x = 0; x < src_w; ++x) {
+				int idx = (y * src_w + x) * 3;
+				src[idx + 0] = 0.3f;
+				src[idx + 1] = 0.6f;
+				src[idx + 2] = 0.9f;
+			}
+		}
+
+		struct sr_context sr{};
+		sr.algorithm = SR_ALG_FSR_1_SPATIAL;
+		sr.width = src_w;
+		sr.height = src_h;
+		sr.target_width = dst_w;
+		sr.target_height = dst_h;
+		sr.sharpness = 0.0f;
+
+		bool ok = sr_apply_upscale(&sr, src, dst);
+		check("FSR1 sharpness=0 (EASU only)", ok);
+
+		delete[] src;
+		delete[] dst;
+	}
+
+	/* Test Integer Scaling */
+	{
+		const int src_w = 160, src_h = 120;
+		const int dst_w = 640, dst_h = 480; /* 4x integer */
+		float *src = new float[src_w * src_h * 3];
+		float *dst = new float[dst_w * dst_h * 3];
+
+		for (int y = 0; y < src_h; ++y) {
+			for (int x = 0; x < src_w; ++x) {
+				int idx = (y * src_w + x) * 3;
+				src[idx + 0] = (x & 32) ? 1.0f : 0.0f;
+				src[idx + 1] = (y & 32) ? 1.0f : 0.0f;
+				src[idx + 2] = 0.0f;
+			}
+		}
+
+		struct sr_context sr{};
+		sr.algorithm = SR_ALG_INTEGER_SCALING;
+		sr.width = src_w;
+		sr.height = src_h;
+		sr.target_width = dst_w;
+		sr.target_height = dst_h;
+		sr.sharpness = 0.0f;
+
+		bool ok = sr_apply_upscale(&sr, src, dst);
+		check("Integer scaling 4x", ok);
+
+		delete[] src;
+		delete[] dst;
+	}
+
+	/* Test DLSS-NR context creation (no weights = CPU reference) */
+	{
+		dlss_nr_config cfg{};
+		cfg.model_dir = "/nonexistent";  /* No weights - CPU ref works without */
+		cfg.quality = DLSS_NR_QUALITY_BALANCED;
+		cfg.backend = DLSS_NR_BACKEND_AUTO;
+		cfg.width = 640;
+		cfg.height = 480;
+		cfg.sharpness = 0.5f;
+
+		dlss_nr_context *ctx = nullptr;
+		dlss_nr_status st = dlss_nr_create(&cfg, &ctx);
+		check("DLSS-NR create (no weights -> CPU ref)", st == DLSS_NR_OK && ctx != nullptr);
+
+		if (ctx) {
+			dlss_nr_stats stats{};
+			st = dlss_nr_get_stats(ctx, &stats);
+			check("DLSS-NR get stats", st == DLSS_NR_OK);
+			check("DLSS-NR backend is CPU_REF", stats.current_backend == DLSS_NR_BACKEND_CPU_REF);
+
+			dlss_nr_destroy(ctx);
+		}
+	}
+
+	/* Test DLSS-NR query caps */
+	{
+		bool has_tc = true;
+		uint32_t max_w = 0, max_h = 0;
+		size_t model_sz = 0;
+		dlss_nr_status st = dlss_nr_query_caps(DLSS_NR_BACKEND_AUTO, &has_tc, &max_w, &max_h, &model_sz);
+		check("DLSS-NR query caps", st == DLSS_NR_OK && !has_tc && model_sz == 141*1024*1024);
+	}
+}
+
 int main()
 {
 	test_haiku_api();
@@ -409,6 +552,7 @@ int main()
 	test_shim();
 	test_planner();
 	test_ip_blocks();
+	test_fsr1_dlss_nr();
 	printf("rg_test: %d passed, %d failed\n", g_pass, g_fail);
 	return g_fail == 0 ? 0 : 1;
 }
