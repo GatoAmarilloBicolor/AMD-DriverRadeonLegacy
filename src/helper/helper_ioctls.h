@@ -125,6 +125,8 @@ typedef struct rg_pci_cfg_request {
  * here instead of including <Accelerant.h> so that this header stays usable
  * from the kernel helper, where userland OS headers must not be pulled in.
  * The userland accelerant converts between the two representations.
+ * Verified against headers/os/add-ons/graphics/Accelerant.h (master):
+ * display_timing is 24 bytes, display_mode is 40 bytes.
  */
 typedef struct rg_display_timing {
 	uint32_t	pixel_clock;	/* kHz */
@@ -259,6 +261,16 @@ typedef int32_t status_t;
 
 /* Clone kernel area into userland (server clones helper areas for clients) */
 status_t rg_helper_clone_area(int32_t kernel_area, const char *name, void **user_addr);
+
+/*
+ * Payload handlers dispatched by the control hook. They are exported so the
+ * accelerant and in-process contract tests can exercise them directly.
+ */
+status_t rg_ioctl_get_connectors(rg_get_connectors *connectors);
+status_t rg_ioctl_get_crtcs(rg_get_crtcs *crtcs);
+status_t rg_ioctl_set_crtc(rg_set_crtc *crtc);
+status_t rg_ioctl_page_flip(rg_page_flip *flip);
+status_t rg_ioctl_hotplug_event(rg_hotplug_event *event);
 
 #ifdef __cplusplus
 }

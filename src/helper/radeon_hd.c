@@ -568,7 +568,7 @@ static status_t rg_ioctl_pci_cfg(rg_pci_cfg_request *req)
  * backend exposes one simulated head so the ioctl ABI stays testable.
  * ======================================================================== */
 
-static status_t rg_ioctl_get_connectors(rg_get_connectors *connectors)
+status_t rg_ioctl_get_connectors(rg_get_connectors *connectors)
 {
 	if (connectors == NULL)
 		return B_BAD_VALUE;

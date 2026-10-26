@@ -18,6 +18,26 @@
 #include "../common/rg_ipc.h"
 #include "vram_compression.h"
 
+/* Memory pool types for hUMA/SVM unified memory architecture */
+typedef enum MemoryPoolType_enum {
+    MemoryPoolType_VRAM_LOCAL = 0,
+    MemoryPoolType_GTT_MAPPED,
+    MemoryPoolType_CPU_CACHED,
+    MemoryPoolType_CPU_UNCACHED,
+    MemoryPoolType_COMPRESSED,
+    MemoryPoolType_PINNED_HOST,
+    MemoryPoolType_SPARSE,
+    MemoryPoolType_COUNT
+} MemoryPoolType;
+
+/* Configuration for each memory pool */
+struct MemoryPoolConfig {
+    uint64_t vram_size;     /* VRAM reservation (0 = default) */
+    uint64_t gart_size;     /* GTM reservation (0 = default) */
+    uint64_t cpu_cached_size; /* CPU cached pool size */
+    uint64_t cpu_uncached_size; /* CPU uncached pool size */
+};
+
 /* Forward declarations for allocator functions */
 extern void *host_alloc_aligned(size_t size, size_t align);
 extern void host_free(void *p);

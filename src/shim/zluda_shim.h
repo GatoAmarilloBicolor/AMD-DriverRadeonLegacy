@@ -140,7 +140,6 @@ typedef enum CUdevice_attribute_enum {
     CU_DEVICE_ATTRIBUTE_MAXIMUM_TEXTURE3D_HEIGHT_ALTERNATE = 47,
     CU_DEVICE_ATTRIBUTE_MAXIMUM_TEXTURE3D_DEPTH_ALTERNATE = 48,
     CU_DEVICE_ATTRIBUTE_PCI_DOMAIN_ID = 49,
-    CU_DEVICE_ATTRIBUTE_MAX_PITCH = 11,
     CU_DEVICE_ATTRIBUTE_MANAGED_MEMORY = 71,
     CU_DEVICE_ATTRIBUTE_MULTI_GPU_BOARD = 72,
     CU_DEVICE_ATTRIBUTE_MULTI_GPU_BOARD_GROUP_ID = 73,
@@ -234,7 +233,6 @@ typedef enum CUjit_option_enum {
     CU_JIT_GENERATE_DEBUG_INFO = 11,
     CU_JIT_LOG_VERBOSE = 12,
     CU_JIT_GENERATE_LINE_INFO = 13,
-    CU_JIT_GENERATE_DEBUG_INFO = 11,
     CU_JIT_NUM_OPTIONS = 14,
 } CUjit_option;
 
@@ -386,6 +384,11 @@ CUresult cuMemcpy3D_v2(const CUDA_MEMCPY3D *pCopy);
 CUresult cuMemcpy3DAsync_v2(const CUDA_MEMCPY3D *pCopy, CUstream hStream);
 
 /* Memory allocation with properties (CUDA 11+) */
+typedef struct CUDA_MEMCPY2D;
+typedef struct CUDA_MEMCPY3D;
+typedef struct CUmemAllocationProp;
+typedef uint64_t CUmemGenericAllocationHandle;
+
 CUresult cuMemCreate(CUmemGenericAllocationHandle *handle, size_t size, 
                      const CUmemAllocationProp *prop, unsigned long long flags);
 CUresult cuMemRelease(CUmemGenericAllocationHandle handle);
