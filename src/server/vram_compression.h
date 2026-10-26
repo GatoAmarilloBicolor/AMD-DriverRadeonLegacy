@@ -12,7 +12,9 @@ enum vram_compression_mode {
 	VRAM_COMPRESS_NONE = 0,
 	VRAM_COMPRESS_FAST_LZ4 = 1,
 	VRAM_COMPRESS_DELTA_COLOR = 2,
-	VRAM_COMPRESS_QUANTIZE_16BIT = 3 /* Reducción dinámica de 32-bit RGBA8 a 16-bit RGB565 */
+	VRAM_COMPRESS_QUANTIZE_16BIT = 3,  /* 32-bit RGBA8 → 16-bit RGB565 */
+	VRAM_COMPRESS_QUANTIZE_8BIT = 4,   /* 32-bit RGBA8 → 8-bit Luminance */
+	VRAM_COMPRESS_DEPTH_REDUCE = 5     /* Depth/Stencil 32-bit (D24S8/D32F) → 16-bit Depth */
 };
 
 struct vram_surface {

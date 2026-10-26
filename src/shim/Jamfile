@@ -9,8 +9,9 @@ if $(RG_REPO) = "" {
 	Exit 1 ;
 }
 
-SEARCH on [ FGristFiles radeon_shim.c amdgpu_shim.c ] =
+SEARCH on [ FGristFiles radeon_shim.c amdgpu_shim.c zluda_shim.c ] =
 	[ FDirName $(RG_REPO) src shim ] ;
 
 SharedLibrary libdrm_haiku.so : radeon_shim.c ;
 SharedLibrary libdrm_amdgpu.so : amdgpu_shim.c ;
+SharedLibrary libzluda.so : zluda_shim.c ;

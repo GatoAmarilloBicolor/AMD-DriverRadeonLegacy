@@ -59,7 +59,7 @@ static bool dcc_decompress(const uint32_t *src, size_t blocks, uint32_t *dst)
 	return true;
 }
 
-/* ---------- 32-bit RGBA8 → 16-bit RGB565 quantization ----------------------- */
+/* ---------- 32-bit RGBA8 → 16-bit RGB565 / 8-bit Luminance quantization ----- */
 bool vram_quantize_texture_to_16bit(const uint32_t *src_rgba8, uint16_t *dst_rgb565, size_t pixel_count)
 {
 	for (size_t i = 0; i < pixel_count; ++i) {
@@ -72,6 +72,19 @@ bool vram_quantize_texture_to_16bit(const uint32_t *src_rgba8, uint16_t *dst_rgb
 	return true;
 }
 
+bool vram_quantize_texture_to_8bit(const uint32_t *src_rgba8, uint8_t *dst_l8, size_t pixel_count)
+{
+	for (size_t i = 0; i < pixel_count; ++i) {
+		uint32_t p = src_rgba8[i];
+		uint32_t r = (p >> 16) & 0xFF;
+		uint32_t g = (p >> 8) & 0xFF;
+		uint32_t b = p & 0xFF;
+		// Coeficientes estándar de luminancia ITU-R BT.601
+		dst_l8[i] = (uint8_t)((r * 299 + g * 587 + b * 114) / 1000);
+	}
+	return true;
+}
+
 static bool vram_dequantize_16bit_to_32bit(const uint16_t *src_rgb565, uint32_t *dst_rgba8, size_t pixel_count)
 {
 	for (size_t i = 0; i < pixel_count; ++i) {
@@ -80,6 +93,34 @@ static bool vram_dequantize_16bit_to_32bit(const uint16_t *src_rgb565, uint32_t 
 		uint32_t g = ((p >> 5) & 0x3F) << 2;   // 6→8
 		uint32_t b = (p & 0x1F) << 3;          // 5→8
 		dst_rgba8[i] = (r << 16) | (g << 8) | b | 0xFF000000;
+	}
+	return true;
+}
+
+static bool vram_dequantize_8bit_to_32bit(const uint8_t *src_l8, uint32_t *dst_rgba8, size_t pixel_count)
+{
+	for (size_t i = 0; i < pixel_count; ++i) {
+		uint32_t v = src_l8[i];
+		dst_rgba8[i] = (v << 16) | (v << 8) | v | 0xFF000000;
+	}
+	return true;
+}
+
+/* ---------- Depth / Stencil Reduction (D24S8 / D32F → 16-bit Depth) ----------- */
+bool vram_reduce_depth_surface(const uint32_t *src_depth32, uint16_t *dst_depth16, size_t pixel_count)
+{
+	for (size_t i = 0; i < pixel_count; ++i) {
+		uint32_t val = src_depth32[i];
+		dst_depth16[i] = (uint16_t)(val >> (val > 0x00FFFFFF ? 16 : 8));
+	}
+	return true;
+}
+
+static bool vram_expand_depth_surface(const uint16_t *src_depth16, uint32_t *dst_depth32, size_t pixel_count)
+{
+	for (size_t i = 0; i < pixel_count; ++i) {
+		uint32_t val = src_depth16[i];
+		dst_depth32[i] = val << 8;
 	}
 	return true;
 }
@@ -120,15 +161,37 @@ bool vram_compress_surface(struct vram_surface *surface)
 	size_t pixel_count = surface->size_bytes / 4;
 
 	if (vram_is_under_severe_pressure()) {
-		uint16_t *dst16 = (uint16_t *)malloc(pixel_count * 2);
-		if (!dst16) return false;
-		vram_quantize_texture_to_16bit((const uint32_t *)surface->data, dst16, pixel_count);
-		free(surface->data);
-		surface->data = dst16;
-		surface->size_bytes = pixel_count * 2;
-		surface->mode = VRAM_COMPRESS_QUANTIZE_16BIT;
-		surface->is_compressed = true;
-		return true;
+		if (surface->mode == VRAM_COMPRESS_DEPTH_REDUCE) {
+			uint16_t *dst16 = (uint16_t *)malloc(pixel_count * 2);
+			if (!dst16) return false;
+			vram_reduce_depth_surface((const uint32_t *)surface->data, dst16, pixel_count);
+			free(surface->data);
+			surface->data = dst16;
+			surface->size_bytes = pixel_count * 2;
+			surface->is_compressed = true;
+			return true;
+		}
+		if (surface->mode == VRAM_COMPRESS_QUANTIZE_16BIT || surface->size_bytes > 4096 * 1024) {
+			uint8_t *dst8 = (uint8_t *)malloc(pixel_count);
+			if (!dst8) return false;
+			vram_quantize_texture_to_8bit((const uint32_t *)surface->data, dst8, pixel_count);
+			free(surface->data);
+			surface->data = dst8;
+			surface->size_bytes = pixel_count;
+			surface->mode = VRAM_COMPRESS_QUANTIZE_8BIT;
+			surface->is_compressed = true;
+			return true;
+		} else {
+			uint16_t *dst16 = (uint16_t *)malloc(pixel_count * 2);
+			if (!dst16) return false;
+			vram_quantize_texture_to_16bit((const uint32_t *)surface->data, dst16, pixel_count);
+			free(surface->data);
+			surface->data = dst16;
+			surface->size_bytes = pixel_count * 2;
+			surface->mode = VRAM_COMPRESS_QUANTIZE_16BIT;
+			surface->is_compressed = true;
+			return true;
+		}
 	}
 
 	if (surface->mode == VRAM_COMPRESS_FAST_LZ4) {
@@ -162,9 +225,29 @@ bool vram_compress_surface(struct vram_surface *surface)
 bool vram_decompress_surface(struct vram_surface *surface)
 {
 	if (!surface || !surface->data || !surface->is_compressed) return false;
-	size_t pixel_count = surface->size_bytes / 4;
+	size_t pixel_count = (surface->mode == VRAM_COMPRESS_QUANTIZE_8BIT) ? surface->size_bytes : (surface->size_bytes / 4);
 
 	switch (surface->mode) {
+	case VRAM_COMPRESS_DEPTH_REDUCE: {
+		uint32_t *dst32 = (uint32_t *)malloc(pixel_count * 4);
+		if (!dst32) return false;
+		vram_expand_depth_surface((const uint16_t *)surface->data, dst32, pixel_count);
+		free(surface->data);
+		surface->data = dst32;
+		surface->size_bytes = pixel_count * 4;
+		surface->is_compressed = false;
+		return true;
+	}
+	case VRAM_COMPRESS_QUANTIZE_8BIT: {
+		uint32_t *dst32 = (uint32_t *)malloc(pixel_count * 4);
+		if (!dst32) return false;
+		vram_dequantize_8bit_to_32bit((const uint8_t *)surface->data, dst32, pixel_count);
+		free(surface->data);
+		surface->data = dst32;
+		surface->size_bytes = pixel_count * 4;
+		surface->is_compressed = false;
+		return true;
+	}
 	case VRAM_COMPRESS_QUANTIZE_16BIT: {
 		uint32_t *dst32 = (uint32_t *)malloc(pixel_count * 4);
 		if (!dst32) return false;

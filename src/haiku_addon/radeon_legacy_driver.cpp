@@ -17,15 +17,23 @@
 /* Estado global del acelerador                                        */
 /* ------------------------------------------------------------------ */
 
+#define MAX_HEADS 4
+
+typedef struct radeon_head_state {
+    uint32_t head_id;
+    bool active;
+    display_mode current_mode;
+    area_id framebuffer_area;
+    void *framebuffer_virt;
+    uint32_t crtc_index;
+} radeon_head_state;
+
 typedef struct radeon_accelerant_state {
     int fd;                      /* File descriptor del helper (/dev/graphics/radeon_hd) */
     area_id regs_area;           /* Área MMIO clonada desde helper */
-    area_id framebuffer_area;    /* Área framebuffer clonada */
     void *regs_virt;             /* Puntero virtual a registros MMIO */
-    void *framebuffer_virt;      /* Puntero virtual a framebuffer */
-    uint32_t width, height, bpp; /* Modo actual */
-    bool accelerated;            /* Aceleración 2D habilitada */
-    display_mode current_mode;   /* Modo de vídeo actual */
+    uint32_t head_count;         /* Número de pantallas detectadas (Multi-Head) */
+    radeon_head_state heads[MAX_HEADS];
 } radeon_accelerant_state;
 
 static radeon_accelerant_state *g_state = NULL;
@@ -87,6 +95,15 @@ status_t init_hardware(void)
         return B_ERROR;
     }
     
+    g_state->head_count = 2; /* Soporte multi-head estándar (CRTC0 y CRTC1) */
+    for (uint32_t i = 0; i < g_state->head_count; i++) {
+        g_state->heads[i].head_id = i;
+        g_state->heads[i].active = (i == 0); /* Head principal activo por defecto */
+        g_state->heads[i].crtc_index = i;
+        g_state->heads[i].framebuffer_area = -1;
+        g_state->heads[i].framebuffer_virt = NULL;
+    }
+    
     return B_OK;
 }
 
@@ -99,9 +116,11 @@ void uninit_hardware(void)
         delete_area(g_state->regs_area);
         g_state->regs_area = -1;
     }
-    if (g_state->framebuffer_area >= 0) {
-        delete_area(g_state->framebuffer_area);
-        g_state->framebuffer_area = -1;
+    for (uint32_t i = 0; i < g_state->head_count; i++) {
+        if (g_state->heads[i].framebuffer_area >= 0) {
+            delete_area(g_state->heads[i].framebuffer_area);
+            g_state->heads[i].framebuffer_area = -1;
+        }
     }
     close_helper_device(g_state->fd);
     free(g_state);
