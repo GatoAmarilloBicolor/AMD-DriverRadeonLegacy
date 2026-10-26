@@ -69,7 +69,7 @@ LIB_OBJS := $(patsubst %.cpp,$(BUILD)/%.o,$(LIB_CXX)) \
 TEST_BINS := $(BUILD)/rg_asm_check $(BUILD)/rg_test
 
 .PHONY: all userland helper helper-kernel helper-asm shim test test-quick \
-        test-asan asm-test lint lint-fast typecheck clean docs asic-db
+        test-asan asm-test lint lint-fast typecheck haiku-check clean docs asic-db
 
 all: userland $(TEST_BINS) $(BUILD)/radeon_hd.o
 
@@ -153,6 +153,21 @@ lint: lint-fast
 	@echo "lint: sin reglas adicionales (no hay linter externo configurado)"
 
 typecheck: lint-fast
+
+# Sintaxis del codigo Haiku real (kernel + acelerador) contra los stubs.
+# No enlaza ni ejecuta: el build real necesita el SDK/arborescence de Haiku.
+HAIKU_CHECK_SRC := src/kernel/radeon_legacy_kernel.cpp \
+	src/server/asic/rg_asic.cpp \
+	src/haiku_addon/radeon_legacy_driver.cpp
+
+haiku-check:
+	@set -e; for f in $(HAIKU_CHECK_SRC); do \
+		echo "  haiku-check $$f"; \
+		$(CXX) -std=c++17 -Wall -Wextra -Wno-unused-parameter \
+		    -D__HAIKU__ -Isrc -Isrc/common -Isrc/helper \
+		    -Isrc/kernel/haiku_stub -fsyntax-only $$f; \
+	done
+	@echo "haiku-check: OK (stubs; real build requires Haiku SDK)"
 
 # --- datos y docs ----------------------------------------------------
 asic-db:

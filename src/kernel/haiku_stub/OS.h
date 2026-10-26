@@ -20,6 +20,27 @@ extern "C" {
 
 #define B_INFINITE_TIMEOUT	(0x7FFFFFFFFFFFFFFFLL)
 
+/* Area address specifications. */
+#define B_ANY_ADDRESS			0
+#define B_EXACT_ADDRESS			1
+#define B_BASE_ADDRESS			2
+#define B_CLONE_ADDRESS			3
+#define B_ANY_KERNEL_ADDRESS	4
+#define B_ANY_KERNEL_BLOCK_ADDRESS 5
+#define B_RANDOMIZED_ANY_ADDRESS 6
+#define B_RANDOMIZED_BASE_ADDRESS 7
+
+/* Area protections. */
+#define B_READ_AREA			(1 << 0)
+#define B_WRITE_AREA			(1 << 1)
+#define B_EXECUTE_AREA			(1 << 2)
+#define B_STACK_AREA			(1 << 3)
+#define B_KERNEL_READ_AREA		(1 << 4)
+#define B_KERNEL_WRITE_AREA		(1 << 5)
+#define B_KERNEL_EXECUTE_AREA	(1 << 6)
+#define B_KERNEL_STACK_AREA		(1 << 7)
+#define B_CLONEABLE_AREA		(1 << 8)
+
 enum {
 	B_TIMEOUT					= 0x08,
 	B_RELATIVE_TIMEOUT			= 0x08,

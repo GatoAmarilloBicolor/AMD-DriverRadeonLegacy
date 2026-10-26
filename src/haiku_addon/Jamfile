@@ -1,10 +1,11 @@
-# Haiku Accelerant Add-on (ADR-004, Fase 2).
+# Haiku accelerant add-on (ADR-004, fase 2).
 #
-# Se publica como add-ons/accelerants/radeon_legacy.so
-# y se carga por app_server al detectar la GPU.
+# app_server carga el add-on por la firma que devuelve el kernel con
+# B_GET_ACCELERANT_SIGNATURE ("radeon_legacy.accelerant"), por lo que el
+# nombre del binario debe ser exactamente radeon_legacy.accelerant.
 #
-# Uso (desde el árbol de Haiku):
-#   jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy radeon_legacy
+# Uso (desde el arbol de Haiku):
+#   jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy radeon_legacy.accelerant
 
 SubDir HAIKU_TOP src add-ons accelerants radeon_legacy ;
 
@@ -13,13 +14,15 @@ if $(RG_REPO) = "" {
 	Exit 1 ;
 }
 
-SEARCH on [ FGristFiles radeon_legacy_driver.cpp haiku_kits_integration.cpp ] =
+SEARCH on [ FGristFiles radeon_legacy_driver.cpp ] =
 	[ FDirName $(RG_REPO) src haiku_addon ] ;
+SEARCH on [ FGristFiles rg_asic.cpp ] =
+	[ FDirName $(RG_REPO) src server asic ] ;
 
-# Flags necesarios para el acelerador
-AddonFlags = -DRG_ACCELERANT ;
-SubDirCcFlags $(AddonFlags) ;
-
-Addon radeon_legacy.so :
+# El acelerador habla con el kernel solo por ioctl; no enlaza common ni
+# libaccelerantscommon.
+Addon radeon_legacy.accelerant :
 	radeon_legacy_driver.cpp
-	haiku_kits_integration.cpp ;
+	rg_asic.cpp
+	:
+	be ;

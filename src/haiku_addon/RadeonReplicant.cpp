@@ -63,8 +63,7 @@ void RadeonReplicant::Draw(BRect updateRect)
 void RadeonReplicant::MouseDown(BPoint point)
 {
     BPopUpMenu* menu = new BPopUpMenu("Radeon Menu");
-    menu->AddItem(new BMenuItem("Status: Active", NULL));
-    menu->AddItem(new BMenuItem("Set Resolution", NULL));
+    menu->AddItem(new BMenuItem("Set Resolution", new BMessage('RSET')));
     
     ConvertToScreen(&point);
     menu->Go(point, true, true, true);

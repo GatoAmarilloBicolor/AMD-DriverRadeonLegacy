@@ -92,3 +92,18 @@ int32_t FirmwareLoader::load_for(rg_family family, std::vector<rg_fw_blob> *out,
 	}
 	return loaded;
 }
+
+#include "firmware_fallback.inc"
+
+bool rg_firmware_load_fallback(uint32_t family, const uint32_t **out_data, size_t *out_size) {
+    if (family >= RG_FAMILY_EVERGREEN) {
+        *out_data = kEvergreenCpMicrocodeFallback;
+        *out_size = sizeof(kEvergreenCpMicrocodeFallback);
+        return true;
+    } else if (family >= RG_FAMILY_R600) {
+        *out_data = kR600CpMicrocodeFallback;
+        *out_size = sizeof(kR600CpMicrocodeFallback);
+        return true;
+    }
+    return false;
+}

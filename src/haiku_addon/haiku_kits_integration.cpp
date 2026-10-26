@@ -11,9 +11,13 @@
 
 void register_replicant()
 {
-    BDeskbar deskbar;
-    // Just a placeholder for replicant registration
-    printf("Registering RadeonReplicant...\n");
+    // ...
+}
+
+void haiku_send_set_mode(uint32_t width, uint32_t height)
+{
+    // Aquí implementaremos la llamada al driver/daemon
+    printf("IPC: Set Mode requested: %dx%d\n", width, height);
 }
 
 #include <stdio.h>

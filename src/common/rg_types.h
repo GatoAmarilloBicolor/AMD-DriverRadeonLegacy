@@ -12,7 +12,8 @@
 extern "C" {
 #endif
 
-/* Dominios de memoria (equivalen a RADEON_GEM_DOMAIN_*) */
+/* Códigos IPC de alto nivel */
+#define RG_IPC_SET_MODE 0x52478001
 typedef enum rg_domain {
 	RG_DOMAIN_CPU  = 0,
 	RG_DOMAIN_GTT  = 1,

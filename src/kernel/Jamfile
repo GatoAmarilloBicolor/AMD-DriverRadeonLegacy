@@ -1,0 +1,23 @@
+# Haiku kernel module (standalone backend, ADR-004 "Path B").
+#
+# Publica /dev/graphics/radeon_legacy_<bus><dev><fn> y expone el contrato
+# RG_IOCTL_* de src/helper/helper_ioctls.h.
+#
+# Uso (desde el arbol de Haiku):
+#   jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy radeon_legacy
+
+SubDir HAIKU_TOP src add-ons kernel drivers graphics radeon_legacy ;
+
+if $(RG_REPO) = "" {
+	Echo "RG_REPO no definido: jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy" ;
+	Exit 1 ;
+}
+
+SEARCH on [ FGristFiles radeon_legacy_kernel.cpp ] =
+	[ FDirName $(RG_REPO) src kernel ] ;
+SEARCH on [ FGristFiles rg_asic.cpp ] =
+	[ FDirName $(RG_REPO) src server asic ] ;
+
+KernelAddon radeon_legacy :
+	radeon_legacy_kernel.cpp
+	rg_asic.cpp ;

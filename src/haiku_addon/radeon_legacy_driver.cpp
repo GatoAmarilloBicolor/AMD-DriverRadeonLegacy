@@ -1,581 +1,643 @@
 /*
- * radeon_legacy_driver.cpp - Add-on gráfico nativo de Haiku OS para Radeon Legacy
- * Conecta el app_server con el demonio radeon_gpud y el helper de kernel.
- * Implementa hooks requeridos por Accelerant (GraphicsCard.h / Accelerant.h).
+ * radeon_legacy_driver.cpp - Haiku accelerant for legacy Radeon GPUs.
+ *
+ * Loaded by app_server as add-on "radeon_legacy.accelerant". It talks to the
+ * kernel module exclusively through the RG_IOCTL_* contract in
+ * src/helper/helper_ioctls.h, so it works with either the standalone module
+ * (src/kernel) or the native radeon_hd helper.
  */
-#include <GraphicsCard.h>
 #include <Accelerant.h>
-#include <SupportDefs.h>
+#include <graphic_driver.h>
 #include <OS.h>
+#include <SupportDefs.h>
+
+#include <errno.h>
+#include <fcntl.h>
+#include <stddef.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
-#include "haiku_kits_integration.h"
-#include "RadeonAddonIntegration.h"
+#include "../common/rg_types.h"
+#include "../helper/helper_ioctls.h"
+#include "../server/asic/rg_asic.h"
 
-/* ------------------------------------------------------------------ */
-/* Estado global del acelerador                                        */
-/* ------------------------------------------------------------------ */
+/* The ioctl contract must stay byte-identical to the Accelerant types. */
+static_assert(sizeof(display_timing) == sizeof(rg_display_timing),
+	"display_timing ABI drift");
+static_assert(sizeof(display_mode) == sizeof(rg_display_mode),
+	"display_mode ABI drift");
+static_assert(offsetof(display_mode, timing) == offsetof(rg_display_mode, timing),
+	"display_mode.timing ABI drift");
+static_assert(offsetof(display_mode, flags) == offsetof(rg_display_mode, flags),
+	"display_mode.flags ABI drift");
 
-#define MAX_HEADS 4
 
-typedef struct radeon_head_state {
-    uint32_t head_id;
-    bool active;
-    display_mode current_mode;
-    area_id framebuffer_area;
-    void *framebuffer_virt;
-    uint32_t crtc_index;
-} radeon_head_state;
+struct RadeonLegacyState {
+	int				fd;
+	bool			ownsFD;
+	char			path[B_PATH_NAME_LENGTH];
+	rg_kernel_info	info;
 
-typedef struct radeon_accelerant_state {
-    int fd;                      /* File descriptor del helper (/dev/graphics/radeon_hd) */
-    area_id regs_area;           /* Área MMIO clonada desde helper */
-    void *regs_virt;             /* Puntero virtual a registros MMIO */
-    uint32_t head_count;         /* Número de pantallas detectadas (Multi-Head) */
-    radeon_head_state heads[MAX_HEADS];
-} radeon_accelerant_state;
+	area_id			fbArea;
+	uint8			*fb;
+	uint32			bytesPerRow;
 
-static radeon_accelerant_state *g_state = NULL;
+	area_id			modeArea;
+	display_mode	*modes;
+	uint32			modeCount;
 
-/* ------------------------------------------------------------------ */
-/* Helpers internos                                                    */
-/* ------------------------------------------------------------------ */
+	display_mode	current;
+};
 
-static status_t open_helper_device(void)
+static RadeonLegacyState *sState = NULL;
+
+
+static const display_mode kBootModes[] = {
+	/* 640x480@60 */
+	{ { 25175, 640, 656, 752, 800, 480, 490, 492, 525, 0 },
+		B_RGB32, 640, 480, 0, 0, B_SCROLL },
+	/* 800x600@60 */
+	{ { 40000, 800, 840, 968, 1056, 600, 601, 605, 628,
+		B_POSITIVE_HSYNC | B_POSITIVE_VSYNC },
+		B_RGB32, 800, 600, 0, 0, B_SCROLL },
+	/* 1024x768@60 */
+	{ { 65000, 1024, 1048, 1184, 1344, 768, 771, 777, 806, 0 },
+		B_RGB32, 1024, 768, 0, 0, B_SCROLL },
+	/* 1280x1024@60 */
+	{ { 108000, 1280, 1328, 1440, 1688, 1024, 1025, 1028, 1066,
+		B_POSITIVE_HSYNC | B_POSITIVE_VSYNC },
+		B_RGB32, 1280, 1024, 0, 0, B_SCROLL },
+	/* 1600x1200@60 */
+	{ { 162000, 1600, 1664, 1856, 2160, 1200, 1201, 1204, 1250,
+		B_POSITIVE_HSYNC | B_POSITIVE_VSYNC },
+		B_RGB32, 1600, 1200, 0, 0, B_SCROLL }
+};
+
+static const uint32 kBootModeCount
+	= sizeof(kBootModes) / sizeof(kBootModes[0]);
+
+
+static status_t
+issue_ioctl(int fd, uint32 op, void *argument, size_t size)
 {
-    int fd = open("/dev/graphics/radeon_hd", B_READ_WRITE);
-    if (fd < 0) {
-        fd = open("/dev/graphics/radeon_legacy", B_READ_WRITE); /* standalone */
-    }
-    return fd;
+	if (ioctl(fd, op, argument, size) < 0) {
+		if (errno == EINVAL || errno == ENOTTY)
+			return B_BAD_VALUE;
+		return B_NOT_SUPPORTED;
+	}
+	return B_OK;
 }
 
-static void close_helper_device(int fd)
+
+static const char *
+family_name(uint32_t deviceID, uint32_t revision)
 {
-    if (fd >= 0)
-        close(fd);
+	/* Subsystem is unknown here; pass the wildcard. */
+	const rg_asic_desc *desc
+		= rg_asic_lookup(deviceID, revision, 0xffffffffu);
+	if (desc == NULL)
+		return "Radeon";
+	return rg_asic_family_name(desc->family);
 }
 
-/* Clona área del helper al espacio del app_server */
-static status_t clone_helper_area(int helper_fd, const char *area_name,
-                                  uint32_t ioctl_code, area_id *out_area, void **out_virt)
+
+static status_t
+build_mode_list(RadeonLegacyState *state)
 {
-    rg_map_request req = { 0 };
-    req.flags = RG_MAP_READ | RG_MAP_WRITE;
-    
-    if (ioctl(helper_fd, ioctl_code, &req, sizeof(req)) != B_OK)
-        return B_ERROR;
-    
-    if (req.area < 0)
-        return B_ERROR;
-    
-    *out_area = clone_area(area_name, out_virt, B_ANY_ADDRESS,
-                           B_READ_AREA | B_WRITE_AREA, req.area);
-    if (*out_area < 0)
-        return *out_area;
-    
-    return B_OK;
+	size_t size = kBootModeCount * sizeof(display_mode);
+	void *base = NULL;
+
+	state->modeArea = create_area("radeon legacy modes", &base,
+		B_ANY_ADDRESS, size, B_NO_LOCK,
+		B_READ_AREA | B_WRITE_AREA | B_CLONEABLE_AREA);
+	if (state->modeArea < 0)
+		return state->modeArea;
+
+	state->modes = (display_mode *)base;
+	memcpy(state->modes, kBootModes, size);
+	state->modeCount = kBootModeCount;
+	return B_OK;
 }
 
-/* ------------------------------------------------------------------ */
-/* Hooks requeridos por Accelerant                                     */
-/* ------------------------------------------------------------------ */
 
-status_t init_hardware(void)
+static void
+pick_current_mode(RadeonLegacyState *state)
 {
-    g_state = (radeon_accelerant_state *)calloc(1, sizeof(radeon_accelerant_state));
-    if (!g_state)
-        return B_NO_MEMORY;
-    
-    g_state->fd = open_helper_device();
-    if (g_state->fd < 0) {
-        free(g_state);
-        g_state = NULL;
-        return B_ERROR;
-    }
-    
-    g_state->head_count = 2; /* Soporte multi-head estándar (CRTC0 y CRTC1) */
-    for (uint32_t i = 0; i < g_state->head_count; i++) {
-        g_state->heads[i].head_id = i;
-        g_state->heads[i].active = (i == 0); /* Head principal activo por defecto */
-        g_state->heads[i].crtc_index = i;
-        g_state->heads[i].framebuffer_area = -1;
-        g_state->heads[i].framebuffer_virt = NULL;
-    }
-    
-    return B_OK;
+	rg_get_crtcs crtcs;
+	memset(&crtcs, 0, sizeof(crtcs));
+
+	if (issue_ioctl(state->fd, RG_IOCTL_GET_CRTCS, &crtcs, sizeof(crtcs))
+			== B_OK && crtcs.count > 0) {
+		const rg_crtc_info &crtc = crtcs.crtcs[0];
+		for (uint32 i = 0; i < state->modeCount; i++) {
+			if (state->modes[i].timing.h_display == crtc.width
+				&& state->modes[i].timing.v_display == crtc.height) {
+				state->current = state->modes[i];
+				state->bytesPerRow = crtc.width * 4;
+				return;
+			}
+		}
+	}
+
+	/* 1024x768 is the third bootstrap mode. */
+	state->current = state->modes[2];
+	state->bytesPerRow = state->current.virtual_width * 4;
 }
 
-void uninit_hardware(void)
+
+static void
+destroy_state(RadeonLegacyState *state)
 {
-    if (!g_state)
-        return;
-    
-    if (g_state->regs_area >= 0) {
-        delete_area(g_state->regs_area);
-        g_state->regs_area = -1;
-    }
-    for (uint32_t i = 0; i < g_state->head_count; i++) {
-        if (g_state->heads[i].framebuffer_area >= 0) {
-            delete_area(g_state->heads[i].framebuffer_area);
-            g_state->heads[i].framebuffer_area = -1;
-        }
-    }
-    close_helper_device(g_state->fd);
-    free(g_state);
-    g_state = NULL;
+	if (state == NULL)
+		return;
+
+	if (state->modeArea >= 0)
+		delete_area(state->modeArea);
+	if (state->fbArea >= 0)
+		delete_area(state->fbArea);
+	if (state->ownsFD && state->fd >= 0)
+		close(state->fd);
+
+	free(state);
 }
 
-status_t get_device_info(device_info *info)
+
+static status_t
+rg_init_accelerant(int fd)
 {
-    if (!info)
-        return B_BAD_VALUE;
-    
-    if (!g_state)
-        return B_NO_INIT;
-    
-    rg_kernel_info kinfo = { 0 };
-    if (ioctl(g_state->fd, RG_IOCTL_GET_INFO, &kinfo, sizeof(kinfo)) != B_OK)
-        return B_ERROR;
-    
-    info->vendor_id = kinfo.vendor_id;
-    info->device_id = kinfo.device_id;
-    info->revision = kinfo.revision;
-    info->flags = 0;
-    if (kinfo.host_coherent)
-        info->flags |= B_HARDWARE_CURSOR;
-    
-    return B_OK;
+	if (sState != NULL)
+		return B_BUSY;
+	if (fd < 0)
+		return B_BAD_VALUE;
+
+	RadeonLegacyState *state
+		= (RadeonLegacyState *)calloc(1, sizeof(RadeonLegacyState));
+	if (state == NULL)
+		return B_NO_MEMORY;
+
+	state->fd = fd;
+	state->fbArea = -1;
+	state->modeArea = -1;
+
+	status_t status = issue_ioctl(fd, RG_IOCTL_GET_INFO, &state->info,
+		sizeof(state->info));
+	if (status != B_OK)
+		goto error;
+
+	snprintf(state->path, sizeof(state->path), "/dev/graphics/"
+		"radeon_legacy_%02x%02x%02x", (unsigned)state->info.pci_bus,
+		(unsigned)state->info.pci_device, (unsigned)state->info.pci_function);
+
+	rg_map_request map;
+	memset(&map, 0, sizeof(map));
+	map.area = -1;
+	status = issue_ioctl(fd, RG_IOCTL_MAP_VRAM, &map, sizeof(map));
+	if (status != B_OK || map.area < 0) {
+		status = B_NOT_SUPPORTED;
+		goto error;
+	}
+
+	state->fbArea = clone_area("radeon legacy framebuffer",
+		(void **)&state->fb, B_ANY_ADDRESS, B_READ_AREA | B_WRITE_AREA,
+		map.area);
+	if (state->fbArea < 0) {
+		status = state->fbArea;
+		goto error;
+	}
+
+	status = build_mode_list(state);
+	if (status != B_OK)
+		goto error;
+
+	pick_current_mode(state);
+	sState = state;
+	return B_OK;
+
+error:
+	destroy_state(state);
+	return status;
 }
 
-status_t get_mode_list(display_mode *modes, uint32_t *count)
+
+static void
+rg_uninit_accelerant(void)
 {
-    if (!modes || !count)
-        return B_BAD_VALUE;
-    
-    /* Modos básicos soportados - en producción leer de EDID */
-    static const display_mode supported_modes[] = {
-        { 640, 480, 600000, 0, B_CMAP8 },
-        { 800, 600, 600000, 0, B_CMAP8 },
-        { 1024, 768, 600000, 0, B_CMAP8 },
-        { 1280, 1024, 600000, 0, B_CMAP8 },
-        { 1920, 1080, 600000, 0, B_CMAP8 },
-        { 640, 480, 600000, 0, B_RGB15 },
-        { 800, 600, 600000, 0, B_RGB15 },
-        { 1024, 768, 600000, 0, B_RGB15 },
-        { 1280, 1024, 600000, 0, B_RGB15 },
-        { 1920, 1080, 600000, 0, B_RGB15 },
-        { 640, 480, 600000, 0, B_RGB16 },
-        { 800, 600, 600000, 0, B_RGB16 },
-        { 1024, 768, 600000, 0, B_RGB16 },
-        { 1280, 1024, 600000, 0, B_RGB16 },
-        { 1920, 1080, 600000, 0, B_RGB16 },
-        { 640, 480, 600000, 0, B_RGB32 },
-        { 800, 600, 600000, 0, B_RGB32 },
-        { 1024, 768, 600000, 0, B_RGB32 },
-        { 1280, 1024, 600000, 0, B_RGB32 },
-        { 1920, 1080, 600000, 0, B_RGB32 },
-    };
-    
-    *count = sizeof(supported_modes) / sizeof(supported_modes[0]);
-    if (modes)
-        memcpy(modes, supported_modes, sizeof(supported_modes));
-    
-    return B_OK;
+	if (sState == NULL)
+		return;
+
+	RadeonLegacyState *state = sState;
+	sState = NULL;
+	destroy_state(state);
 }
 
-status_t proposed_mode(display_mode *mode)
+
+static ssize_t
+rg_accelerant_clone_info_size(void)
 {
-    if (!mode)
-        return B_BAD_VALUE;
-    
-    /* Validar modo contra lista conocida */
-    uint32_t count = 0;
-    get_mode_list(NULL, &count);
-    display_mode *list = (display_mode *)malloc(count * sizeof(display_mode));
-    if (!list)
-        return B_NO_MEMORY;
-    
-    get_mode_list(list, &count);
-    
-    for (uint32_t i = 0; i < count; i++) {
-        if (list[i].virtual_width == mode->virtual_width &&
-            list[i].virtual_height == mode->virtual_height &&
-            list[i].space == mode->space) {
-            /* Ajustar timing exacto */
-            *mode = list[i];
-            free(list);
-            return B_OK;
-        }
-    }
-    
-    free(list);
-    return B_BAD_VALUE;
+	return B_PATH_NAME_LENGTH;
 }
 
-status_t set_mode(display_mode *mode)
+
+static void
+rg_get_accelerant_clone_info(void *info)
 {
-    if (!g_state || !mode)
-        return B_BAD_VALUE;
-    
-    /* Validar modo */
-    if (proposed_mode(mode) != B_OK)
-        return B_BAD_VALUE;
-    
-    /* Mapear MMIO si no está mapeado */
-    if (g_state->regs_area < 0) {
-        status_t st = clone_helper_area(g_state->fd, "radeon_mmio",
-                                        RG_IOCTL_MAP_MMIO,
-                                        &g_state->regs_area, &g_state->regs_virt);
-        if (st != B_OK)
-            return st;
-    }
-    
-    /* Mapear framebuffer (VRAM) */
-    if (g_state->framebuffer_area < 0) {
-        status_t st = clone_helper_area(g_state->fd, "radeon_fb",
-                                        RG_IOCTL_MAP_VRAM,
-                                        &g_state->framebuffer_area, &g_state->framebuffer_virt);
-        if (st != B_OK)
-            return st;
-    }
-    
-    /* Configurar modo en hardware - simplificado */
-    rg_kernel_info kinfo = { 0 };
-    if (ioctl(g_state->fd, RG_IOCTL_GET_INFO, &kinfo, sizeof(kinfo)) != B_OK)
-        return B_ERROR;
-    
-    g_state->width = mode->virtual_width;
-    g_state->height = mode->virtual_height;
-    g_state->bpp = (mode->space == B_CMAP8) ? 8 :
-                   (mode->space == B_RGB15 || mode->space == B_RGB16) ? 16 : 32;
-    g_state->current_mode = *mode;
-    g_state->accelerated = true;
-    
-    return B_OK;
+	if (sState != NULL)
+		strlcpy((char *)info, sState->path, B_PATH_NAME_LENGTH);
+	else
+		((char *)info)[0] = '\0';
 }
 
-status_t get_mode(display_mode *mode)
+
+static status_t
+rg_clone_accelerant(void *info)
 {
-    if (!g_state || !mode)
-        return B_BAD_VALUE;
-    
-    *mode = g_state->current_mode;
-    return B_OK;
+	int fd = open((const char *)info, O_RDWR);
+	if (fd < 0)
+		return B_NAME_NOT_FOUND;
+
+	status_t status = rg_init_accelerant(fd);
+	if (status != B_OK) {
+		close(fd);
+		return status;
+	}
+
+	sState->ownsFD = true;
+	return B_OK;
 }
 
-status_t get_frame_buffer_config(frame_buffer_config *config)
+
+static status_t
+rg_get_accelerant_device_info(accelerant_device_info *info)
 {
-    if (!g_state || !config)
-        return B_BAD_VALUE;
-    
-    config->frame_buffer = g_state->framebuffer_virt;
-    config->frame_buffer_bytes_per_row = g_state->width * (g_state->bpp / 8);
-    config->frame_buffer_depth = g_state->bpp;
-    
-    return B_OK;
+	if (sState == NULL)
+		return B_NO_INIT;
+
+	memset(info, 0, sizeof(*info));
+	info->version = B_ACCELERANT_VERSION;
+	strlcpy(info->name, "Radeon Legacy", sizeof(info->name));
+	strlcpy(info->chipset, family_name(sState->info.device_id,
+		sState->info.revision), sizeof(info->chipset));
+	snprintf(info->serial_no, sizeof(info->serial_no), "%04x:%04x rev %02x",
+		(unsigned)sState->info.vendor_id, (unsigned)sState->info.device_id,
+		(unsigned)sState->info.revision);
+	info->memory = sState->info.vram_size > 0xffffffffu
+		? 0xffffffffu : (uint32)sState->info.vram_size;
+	info->dac_speed = 400;
+	return B_OK;
 }
 
-/* ------------------------------------------------------------------ */
-/* Hooks de aceleración 2D (Engine)                                    */
-/* ------------------------------------------------------------------ */
 
-uint32_t acceleration_flags(void)
+static uint32
+rg_accelerant_mode_count(void)
 {
-    if (!g_state || !g_state->accelerated)
-        return 0;
-    
-    return B_HARDWARE_CURSOR | B_2D_ACCELERATION;
+	return sState != NULL ? sState->modeCount : 0;
 }
 
-status_t fill_rectangle(uint32 color, fill_rect_params *params, uint32 count)
+
+static status_t
+rg_get_mode_list(display_mode *list)
 {
-    if (!g_state || !params || count == 0)
-        return B_BAD_VALUE;
-    
-    if (!g_state->accelerated)
-        return B_ERROR;
-    
-    /* Usar ASM blit si disponible, fallback CPU */
-    for (uint32 i = 0; i < count; i++) {
-        haiku_app_kit_blit_surface(NULL, g_state->framebuffer_virt,
-                                   params[i].right - params[i].left + 1,
-                                   params[i].bottom - params[i].top + 1);
-    }
-    return B_OK;
+	if (sState == NULL || list == NULL)
+		return B_BAD_VALUE;
+
+	memcpy(list, sState->modes, sState->modeCount * sizeof(display_mode));
+	return B_OK;
 }
 
-status_t invert_rectangle(fill_rect_params *params, uint32 count)
+
+static status_t
+rg_propose_display_mode(display_mode *target, display_mode *low,
+	display_mode *high)
 {
-    return B_ERROR; /* No implementado */
+	if (sState == NULL || target == NULL)
+		return B_BAD_VALUE;
+
+	uint32 targetPixels = target->timing.h_display * target->timing.v_display;
+	const display_mode *best = &sState->modes[0];
+	uint32 bestDelta = 0xffffffffu;
+
+	for (uint32 i = 0; i < sState->modeCount; i++) {
+		uint32 pixels = sState->modes[i].timing.h_display
+			* sState->modes[i].timing.v_display;
+		uint32 delta = pixels > targetPixels
+			? pixels - targetPixels : targetPixels - pixels;
+		if (delta < bestDelta) {
+			bestDelta = delta;
+			best = &sState->modes[i];
+		}
+	}
+
+	*target = *best;
+	if (low != NULL)
+		*low = *best;
+	if (high != NULL)
+		*high = *best;
+	return B_OK;
 }
 
-status_t blit(blit_params *params, uint32 count)
+
+static status_t
+rg_set_display_mode(display_mode *modeToSet)
 {
-    if (!g_state || !params || count == 0)
-        return B_BAD_VALUE;
-    
-    if (!g_state->accelerated)
-        return B_ERROR;
-    
-    for (uint32 i = 0; i < count; i++) {
-        haiku_app_kit_blit_surface(
-            (const void *)params[i].src_offset,
-            g_state->framebuffer_virt,
-            params[i].width,
-            params[i].height
-        );
-    }
-    return B_OK;
+	if (sState == NULL || modeToSet == NULL)
+		return B_BAD_VALUE;
+
+	rg_set_crtc crtc;
+	memset(&crtc, 0, sizeof(crtc));
+	crtc.crtc_id = 0;
+	crtc.fb_id = 0;
+	crtc.width = modeToSet->timing.h_display;
+	crtc.height = modeToSet->timing.v_display;
+	crtc.mode_valid = 1;
+	memcpy(&crtc.mode, modeToSet, sizeof(crtc.mode));
+
+	status_t status = issue_ioctl(sState->fd, RG_IOCTL_SET_CRTC, &crtc,
+		sizeof(crtc));
+	if (status != B_OK)
+		return status;
+
+	sState->current = *modeToSet;
+	sState->bytesPerRow = modeToSet->virtual_width * 4;
+	return B_OK;
 }
 
-status_t span_fill(uint32 color, span_params *params, uint32 count)
+
+static status_t
+rg_get_display_mode(display_mode *currentMode)
 {
-    return B_ERROR; /* No implementado */
+	if (sState == NULL || currentMode == NULL)
+		return B_BAD_VALUE;
+
+	*currentMode = sState->current;
+	return B_OK;
 }
 
-status_t screen_to_screen_blit(blit_params *params, uint32 count)
+
+static status_t
+rg_get_frame_buffer_config(frame_buffer_config *frameBuffer)
 {
-    return blit(params, count);
+	if (sState == NULL || frameBuffer == NULL)
+		return B_BAD_VALUE;
+
+	uint32 offset = sState->current.v_display_start * sState->bytesPerRow
+		+ sState->current.h_display_start * 4;
+
+	frameBuffer->frame_buffer = sState->fb + offset;
+	frameBuffer->frame_buffer_dma
+		= (void *)(uintptr_t)(sState->info.vram_phys + offset);
+	frameBuffer->bytes_per_row = sState->bytesPerRow;
+	return B_OK;
 }
 
-/* ------------------------------------------------------------------ */
-/* Cursor de hardware                                                  */
-/* ------------------------------------------------------------------ */
 
-status_t set_cursor_shape(cursor_shape *shape)
+static status_t
+rg_get_pixel_clock_limits(display_mode *mode, uint32 *low, uint32 *high)
 {
-    if (!g_state || !g_state->accelerated)
-        return B_ERROR;
-    return B_OK; /* Implementación simplificada */
+	(void)mode;
+	if (low == NULL || high == NULL)
+		return B_BAD_VALUE;
+
+	*low = 10000;
+	/* R300/R420 DACs top out around 400 MHz; R600+ go higher. */
+	*high = 400000;
+	return B_OK;
 }
 
-status_t move_cursor(uint16 x, uint16 y)
+
+static status_t
+rg_get_timing_constraints(display_timing_constraints *constraints)
 {
-    if (!g_state || !g_state->accelerated)
-        return B_ERROR;
-    return B_OK; /* Implementación simplificada */
+	if (constraints == NULL)
+		return B_BAD_VALUE;
+
+	memset(constraints, 0, sizeof(*constraints));
+	constraints->h_res = 8;
+	constraints->h_sync_min = 8;
+	constraints->h_sync_max = 200;
+	constraints->h_blank_min = 8;
+	constraints->h_blank_max = 2048;
+	constraints->v_res = 1;
+	constraints->v_sync_min = 1;
+	constraints->v_sync_max = 16;
+	constraints->v_blank_min = 1;
+	constraints->v_blank_max = 64;
+	return B_OK;
 }
 
-status_t show_cursor(bool visible)
+
+static void
+rg_set_indexed_colors(uint count, uint8 first, const uint8 *colorData,
+	uint32 flags)
 {
-    if (!g_state || !g_state->accelerated)
-        return B_ERROR;
-    return B_OK; /* Implementación simplificada */
+	(void)count; (void)first; (void)colorData; (void)flags;
+	/* Only RGB32 modes are exposed; nothing to program. */
 }
 
-/* ------------------------------------------------------------------ */
-/* Sync / IRQ                                                          */
-/* ------------------------------------------------------------------ */
 
-status_t sync_token(uint32 *token)
+static status_t
+rg_get_preferred_display_mode(display_mode *preferredMode)
 {
-    if (!token)
-        return B_BAD_VALUE;
-    *token = 0; /* Simplificado */
-    return B_OK;
+	if (sState == NULL || preferredMode == NULL)
+		return B_BAD_VALUE;
+
+	for (uint32 i = 0; i < sState->modeCount; i++) {
+		if (sState->modes[i].timing.h_display
+				== sState->current.timing.h_display
+			&& sState->modes[i].timing.v_display
+				== sState->current.timing.v_display) {
+			*preferredMode = sState->modes[i];
+			return B_OK;
+		}
+	}
+
+	*preferredMode = sState->modes[0];
+	return B_OK;
 }
 
-status_t sync_to_token(uint32 token)
+
+static uint32
+rg_dpms_capabilities(void)
 {
-    (void)token;
-    return B_OK; /* Simplificado */
+	/* No SET_DPMS ioctl exists yet: report no DPMS support. */
+	return 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Engine control                                                      */
-/* ------------------------------------------------------------------ */
 
-engine_token *acquire_engine(uint32 capabilities, uint32 max_wait, sync_token *st)
+static uint32
+rg_dpms_mode(void)
 {
-    (void)capabilities; (void)max_wait; (void)st;
-    return NULL; /* No implementado */
+	return B_DPMS_ON;
 }
 
-status_t release_engine(engine_token *et)
+
+static status_t
+rg_set_dpms_mode(uint32 dpmsFlags)
 {
-    (void)et;
-    return B_OK;
+	(void)dpmsFlags;
+	return B_NOT_SUPPORTED;
 }
 
-/* ------------------------------------------------------------------ */
-/* Entry points obligatorios                                           */
-/* ------------------------------------------------------------------ */
 
-status_t radeon_init_accelerant(int device_fd)
+static status_t
+rg_get_edid_info(void *info, uint32 size, uint32 *version)
 {
-    (void)device_fd;
-    return init_hardware();
+	if (sState == NULL || info == NULL || version == NULL)
+		return B_BAD_VALUE;
+
+	rg_get_connectors connectors;
+	memset(&connectors, 0, sizeof(connectors));
+	status_t status = issue_ioctl(sState->fd, RG_IOCTL_GET_CONNECTORS,
+		&connectors, sizeof(connectors));
+	if (status != B_OK || connectors.count == 0)
+		return B_NOT_SUPPORTED;
+
+	const rg_connector_info &connector = connectors.connectors[0];
+	if (connector.edid_size == 0 || connector.edid_size > size)
+		return B_NOT_SUPPORTED;
+
+	memcpy(info, connector.edid, connector.edid_size);
+	*version = 1;
+	return B_OK;
 }
 
-void radeon_uninit_accelerant(void)
+
+static status_t
+rg_move_display(uint16 hDisplayStart, uint16 vDisplayStart)
 {
-    uninit_hardware();
+	(void)hDisplayStart;
+	(void)vDisplayStart;
+	return B_NOT_SUPPORTED;
 }
 
-status_t init_accelerant(device_info *info)
+
+static uint32
+rg_accelerant_engine_count(void)
 {
-    register_replicant();
-    return get_device_info(info);
+	/* No 2D/3D command submission yet; app_server will use software. */
+	return 0;
 }
 
-void uninit_accelerant(void)
+
+static status_t
+rg_acquire_engine(uint32 capabilities, uint32 maxWait, sync_token *syncToken,
+	engine_token **engineToken)
 {
-    uninit_hardware();
+	(void)capabilities;
+	(void)maxWait;
+	(void)syncToken;
+	(void)engineToken;
+	return B_NOT_SUPPORTED;
 }
 
-status_t accelerant_mode_count(uint32 *count)
+
+static status_t
+rg_release_engine(engine_token *engineToken, sync_token *syncToken)
 {
-    return get_mode_list(NULL, count);
+	(void)engineToken;
+	(void)syncToken;
+	return B_OK;
 }
 
-status_t accelerant_get_mode_list(display_mode *modes, uint32 *count)
+
+static void
+rg_wait_engine_idle(void)
 {
-    return get_mode_list(modes, count);
 }
 
-status_t accelerant_propose_mode(display_mode *mode)
+
+static status_t
+rg_get_sync_token(engine_token *engineToken, sync_token *syncToken)
 {
-    return proposed_mode(mode);
+	(void)engineToken;
+	if (syncToken != NULL) {
+		memset(syncToken, 0, sizeof(*syncToken));
+		syncToken->engine_id = 0;
+	}
+	return B_OK;
 }
 
-status_t accelerant_set_mode(display_mode *mode)
+
+static status_t
+rg_sync_to_token(sync_token *syncToken)
 {
-    return set_mode(mode);
+	(void)syncToken;
+	return B_OK;
 }
 
-status_t accelerant_get_mode(display_mode *mode)
+
+extern "C" void *
+get_accelerant_hook(uint32 feature, void *data)
 {
-    return get_mode(mode);
-}
+	(void)data;
 
-status_t accelerant_get_frame_buffer_config(frame_buffer_config *config)
-{
-    return get_frame_buffer_config(config);
-}
+	switch (feature) {
+		/* general */
+		case B_INIT_ACCELERANT:
+			return (void *)rg_init_accelerant;
+		case B_UNINIT_ACCELERANT:
+			return (void *)rg_uninit_accelerant;
+		case B_CLONE_ACCELERANT:
+			return (void *)rg_clone_accelerant;
+		case B_ACCELERANT_CLONE_INFO_SIZE:
+			return (void *)rg_accelerant_clone_info_size;
+		case B_GET_ACCELERANT_CLONE_INFO:
+			return (void *)rg_get_accelerant_clone_info;
+		case B_GET_ACCELERANT_DEVICE_INFO:
+			return (void *)rg_get_accelerant_device_info;
 
-uint32 accelerant_engine_count(void)
-{
-    return 1; /* Un motor 2D */
-}
+		/* mode configuration */
+		case B_ACCELERANT_MODE_COUNT:
+			return (void *)rg_accelerant_mode_count;
+		case B_GET_MODE_LIST:
+			return (void *)rg_get_mode_list;
+		case B_PROPOSE_DISPLAY_MODE:
+			return (void *)rg_propose_display_mode;
+		case B_GET_PREFERRED_DISPLAY_MODE:
+			return (void *)rg_get_preferred_display_mode;
+		case B_SET_DISPLAY_MODE:
+			return (void *)rg_set_display_mode;
+		case B_GET_DISPLAY_MODE:
+			return (void *)rg_get_display_mode;
+		case B_GET_FRAME_BUFFER_CONFIG:
+			return (void *)rg_get_frame_buffer_config;
+		case B_GET_PIXEL_CLOCK_LIMITS:
+			return (void *)rg_get_pixel_clock_limits;
+		case B_GET_TIMING_CONSTRAINTS:
+			return (void *)rg_get_timing_constraints;
+		case B_MOVE_DISPLAY:
+			return (void *)rg_move_display;
+		case B_SET_INDEXED_COLORS:
+			return (void *)rg_set_indexed_colors;
+		case B_GET_EDID_INFO:
+			return (void *)rg_get_edid_info;
 
-status_t accelerant_acquire_engine(uint32 capabilities, uint32 max_wait, sync_token *st)
-{
-    return acquire_engine(capabilities, max_wait, st) ? B_OK : B_ERROR;
-}
+		/* DPMS */
+		case B_DPMS_CAPABILITIES:
+			return (void *)rg_dpms_capabilities;
+		case B_DPMS_MODE:
+			return (void *)rg_dpms_mode;
+		case B_SET_DPMS_MODE:
+			return (void *)rg_set_dpms_mode;
 
-status_t accelerant_release_engine(engine_token *et)
-{
-    return release_engine(et);
-}
+		/* engine/synchronization */
+		case B_ACCELERANT_ENGINE_COUNT:
+			return (void *)rg_accelerant_engine_count;
+		case B_ACQUIRE_ENGINE:
+			return (void *)rg_acquire_engine;
+		case B_RELEASE_ENGINE:
+			return (void *)rg_release_engine;
+		case B_WAIT_ENGINE_IDLE:
+			return (void *)rg_wait_engine_idle;
+		case B_GET_SYNC_TOKEN:
+			return (void *)rg_get_sync_token;
+		case B_SYNC_TO_TOKEN:
+			return (void *)rg_sync_to_token;
 
-uint32 accelerant_get_engine_token(void)
-{
-    return 0;
-}
-
-status_t accelerant_set_cursor_shape(cursor_shape *shape)
-{
-    return set_cursor_shape(shape);
-}
-
-status_t accelerant_move_cursor(uint16 x, uint16 y)
-{
-    return move_cursor(x, y);
-}
-
-status_t accelerant_show_cursor(bool visible)
-{
-    return show_cursor(visible);
-}
-
-status_t accelerant_sync_token(uint32 *token)
-{
-    return sync_token(token);
-}
-
-status_t accelerant_sync_to_token(uint32 token)
-{
-    return sync_to_token(token);
-}
-
-/* ------------------------------------------------------------------ */
-/* Funciones 2D Engine                                                 */
-/* ------------------------------------------------------------------ */
-
-status_t accelerant_fill_rectangle(uint32 color, fill_rect_params *params, uint32 count)
-{
-    return fill_rectangle(color, params, count);
-}
-
-status_t accelerant_invert_rectangle(fill_rect_params *params, uint32 count)
-{
-    return invert_rectangle(params, count);
-}
-
-status_t accelerant_blit(blit_params *params, uint32 count)
-{
-    return blit(params, count);
-}
-
-status_t accelerant_span_fill(uint32 color, span_params *params, uint32 count)
-{
-    return span_fill(color, params, count);
-}
-
-status_t accelerant_screen_to_screen_blit(blit_params *params, uint32 count)
-{
-    return screen_to_screen_blit(params, count);
-}
-
-/* Hooks opcionales (no implementados) */
-
-status_t accelerant_engine_restart(void)
-{
-    return B_OK;
-}
-
-status_t accelerant_mode_changed(display_mode *mode)
-{
-    return B_OK;
-}
-
-status_t accelerant_dpms_capabilities(uint32 *capabilities)
-{
-    if (capabilities)
-        *capabilities = B_DPMS_ON | B_DPMS_STAND_BY | B_DPMS_SUSPEND | B_DPMS_OFF;
-    return B_OK;
-}
-
-status_t accelerant_dpms_mode(uint32 *mode)
-{
-    if (mode)
-        *mode = B_DPMS_ON;
-    return B_OK;
-}
-
-status_t accelerant_set_dpms_mode(uint32 mode)
-{
-    (void)mode;
-    return B_OK;
-}
-
-status_t accelerant_get_pci_info(pci_info *info)
-{
-    if (!g_state || !info)
-        return B_BAD_VALUE;
-    
-    rg_kernel_info kinfo = { 0 };
-    if (ioctl(g_state->fd, RG_IOCTL_GET_INFO, &kinfo, sizeof(kinfo)) != B_OK)
-        return B_ERROR;
-    
-    info->vendor_id = kinfo.vendor_id;
-    info->device_id = kinfo.device_id;
-    info->revision = kinfo.revision;
-    info->bus = kinfo.pci_bus;
-    info->device = kinfo.pci_device;
-    info->function = kinfo.pci_function;
-    return B_OK;
+		/* cursor, blit and overlay hooks are intentionally absent. */
+		default:
+			return NULL;
+	}
 }

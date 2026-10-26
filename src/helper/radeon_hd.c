@@ -611,6 +611,8 @@ status_t rg_ioctl_set_crtc(rg_set_crtc *crtc)
 	if (crtc == NULL)
 		return B_BAD_VALUE;
 
+	if (crtc->crtc_id >= 2)
+		return B_BAD_VALUE;
 	if (crtc->mode_valid
 		&& (crtc->mode.timing.h_total == 0 || crtc->mode.timing.v_total == 0))
 		return B_BAD_VALUE;
@@ -627,6 +629,9 @@ status_t rg_ioctl_set_crtc(rg_set_crtc *crtc)
 status_t rg_ioctl_page_flip(rg_page_flip *flip)
 {
 	if (flip == NULL)
+		return B_BAD_VALUE;
+
+	if (flip->crtc_id >= 2)
 		return B_BAD_VALUE;
 
 #ifdef __HAIKU__
