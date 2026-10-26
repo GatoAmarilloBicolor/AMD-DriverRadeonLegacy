@@ -3,6 +3,18 @@
  * Implementaciones stub que conectan con radeon_gpud vía IPC o shims.
  */
 #include "haiku_kits_integration.h"
+#include "RadeonAddonIntegration.h"
+#include "RadeonReplicant.h"
+#include <Deskbar.h>
+#include <Roster.h>
+#include <Entry.h>
+
+void register_replicant()
+{
+    BDeskbar deskbar;
+    // Just a placeholder for replicant registration
+    printf("Registering RadeonReplicant...\n");
+}
 
 #include <stdio.h>
 #include <string.h>

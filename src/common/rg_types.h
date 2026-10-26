@@ -101,6 +101,12 @@ enum {
 	RG_MAP_WC    = 1u << 2
 };
 
+/* Color space constants (matching Haiku's color_space) */
+#define B_CMAP8     0
+#define B_RGB15     1
+#define B_RGB16     2
+#define B_RGB32     3
+
 /* Firmware: maxima cantidad de blobs por ASIC */
 #define RG_FW_MAX_BLOBS 8
 #define RG_FW_NAME_MAX  64

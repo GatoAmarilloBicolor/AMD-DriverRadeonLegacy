@@ -45,8 +45,8 @@ enum rg_helper_ioctl {
 	RG_IOCTL_GET_CRTCS = 0x52470009,
 	RG_IOCTL_SET_CRTC = 0x5247000A,
 	RG_IOCTL_PAGE_FLIP = 0x5247000B,
-	RG_IOCTL_HOTPLUG_EVENT = 0x5247000C
-};
+	RG_IOCTL_HOTPLUG_EVENT = 0x5247000C,
+	RG_IOCTL_BPORT_TRANSPORT = 0x5247000D,};
 
 /* GET_INFO */
 typedef struct rg_kernel_info {
@@ -138,7 +138,9 @@ typedef struct rg_display_timing {
 	uint16_t	v_sync_start;
 	uint16_t	v_sync_end;
 	uint16_t	v_total;
-	uint32_t	flags;			/* sync polarity, etc. */
+uint16_t h_sync_polarity; /* 0 = positive, 1 = negative */
+uint16_t v_sync_polarity; /* 0 = positive, 1 = negative */
+uint32_t flags; /* sync polarity, etc. */
 } rg_display_timing;
 
 typedef struct rg_display_mode {
@@ -261,6 +263,7 @@ typedef int32_t status_t;
 
 /* Clone kernel area into userland (server clones helper areas for clients) */
 status_t rg_helper_clone_area(int32_t kernel_area, const char *name, void **user_addr);
+status_t rg_ioctl_bport_transport(void *cookie, uint32_t code, void *buffer, size_t size);
 
 /*
  * Payload handlers dispatched by the control hook. They are exported so the

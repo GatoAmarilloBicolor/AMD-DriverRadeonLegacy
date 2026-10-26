@@ -1,14 +1,14 @@
-# Helper de kernel para Haiku (C1 / Fase 1).
 #
-# Produccion: se integra en el radeon_hd nativo (ADR-004), que ya posee
-# modesetting/AtomBIOS; publica graphics/radeon_hd.
+# Kernel Helper Driver for Haiku (radeon_hd / radeon_legacy)
 #
-# Desarrollo aislado:
-#   jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy -sRG_STANDALONE=1
-# publica graphics/radeon_legacy y no colisiona con el driver nativo.
+# Producción: se integra en el radeon_hd nativo de Haiku (ADR-004), que ya
+# posee modesetting/AtomBIOS. Para desarrollo aislado se compila con
+# -DRG_STANDALONE_HELPER y publica graphics/radeon_legacy.
 #
-# Uso (desde el arbol de Haiku):
+# Uso (desde el árbol de Haiku):
 #   jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy radeon_hd
+#   jam -sRG_REPO=/ruta/AMD-DriverRadeonLegacy -sRG_STANDALONE=1 radeon_legacy
+#
 
 SubDir HAIKU_TOP src add-ons kernel drivers graphics radeon_hd ;
 
@@ -19,12 +19,22 @@ if $(RG_REPO) = "" {
 
 UsePrivateKernelHeaders ;
 
+# Source files for the kernel helper
 SEARCH on [ FGristFiles radeon_hd.c ] = [ FDirName $(RG_REPO) src helper ] ;
 
+# Module name - standalone vs production
 _rg_module = radeon_hd ;
 if $(RG_STANDALONE) = 1 {
 	_rg_module = radeon_legacy ;
 	SubDirCcFlags -DRG_STANDALONE_HELPER ;
 }
 
+# Required Haiku kernel modules
+RequiredModule b_pci_module ;
+RequiredModule b_graphics_card_module ;
+
+# Link against kernel runtime
 KernelAddon $(_rg_module) : radeon_hd.c ;
+
+# Install to graphics drivers directory
+Install <haikuimage:system:add-ons:kernel:drivers:graphics> : $(_rg_module) ;

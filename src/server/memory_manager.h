@@ -108,6 +108,11 @@ public:
 
 private:
 	struct Range { uint64_t offset, size; };
+	struct PoolState {
+		uint64_t total_size = 0;
+		uint64_t used = 0;
+		std::vector<Range> free_list;
+	};
 	int32_t alloc_vram(uint64_t size, uint64_t align, uint64_t *offset);
 	void free_vram(uint64_t offset, uint64_t size);
 	int32_t alloc_gtt(uint64_t size, uint64_t align, uint64_t *offset);
@@ -119,12 +124,21 @@ private:
 	void destroy_bo(rg_bo &bo);
 	void update_pressure_state();
 
+	/* hUMA/SVM pool management */
+	int32_t configure_pool(MemoryPoolType type, const MemoryPoolConfig &config);
+	void get_pool_stats(MemoryPoolType type, uint64_t *used, uint64_t *free, uint64_t *total);
+
 	uint64_t fVramSize, fGartSize;
 	uint64_t fVramUsed = 0, fGartUsed = 0;
 	uint32_t fNextHandle = 1;
 	uint64_t fClock = 1;
 	uint64_t fEvictions = 0;
 	int32_t  fNextArea = 1;
+
+	/* hUMA/SVM multi-pool state */
+	PoolState fPools[MemoryPoolType_COUNT];
+	mutable std::mutex fPoolLock;
+	mutable std::mutex fLock;
 
 	IFenceAllocator *fFenceAlloc = nullptr;
 	class RingManager *fRingManager = nullptr;
@@ -133,7 +147,6 @@ private:
 	std::vector<Range> fVramFree;
 	std::vector<Range> fGartFree;
 	std::map<uint32_t, std::unique_ptr<rg_bo>> fBos;
-	mutable std::mutex fLock;
 };
 
 #endif /* RG_MEMORY_MANAGER_H */

@@ -52,11 +52,14 @@ typedef struct rg_info_reply {
 	uint32_t revision;
 	uint32_t family;       /* rg_family */
 	uint32_t host_coherent;/* §6.10 */
+	uint32_t preferred;    /* 1 = preferred GPU, 0 = secondary */
+	uint32_t screen_count; /* Number of screens */
 	uint64_t mmio_phys;
 	uint64_t mmio_size;
 	uint64_t vram_phys;
 	uint64_t vram_size;
 	uint64_t gart_size;
+	uint64_t tiling_capabilities; /* Bitfield of supported tiling formats */
 } rg_info_reply;
 
 typedef struct rg_bo_create {

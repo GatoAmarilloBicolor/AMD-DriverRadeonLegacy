@@ -54,6 +54,44 @@ MemoryManager::MemoryManager(uint64_t vram_size, uint64_t gart_size, IFenceAlloc
 		fVramSize = 256ull << 20;
 	if (fGartSize == 0)
 		fGartSize = 512ull << 20;
+
+	/* Initialize hUMA/SVM multi-pools */
+	for (int i = 0; i < static_cast<int>(MemoryPoolType_COUNT); i++) {
+		fPools[i].used = 0;
+		fPools[i].free_list.clear();
+		switch (static_cast<MemoryPoolType>(i)) {
+		case MemoryPoolType_VRAM_LOCAL:
+			fPools[i].total_size = fVramSize;
+			fPools[i].free_list = {{0, fVramSize}};
+			break;
+		case MemoryPoolType_GTT_MAPPED:
+			fPools[i].total_size = fGartSize;
+			fPools[i].free_list = {{0, fGartSize}};
+			break;
+		case MemoryPoolType_CPU_CACHED:
+			fPools[i].total_size = 16ull << 30;
+			fPools[i].free_list = {{0, 16ull << 30}};
+			break;
+		case MemoryPoolType_CPU_UNCACHED:
+			fPools[i].total_size = 4ull << 30;
+			fPools[i].free_list = {{0, 4ull << 30}};
+			break;
+		case MemoryPoolType_COMPRESSED:
+		case MemoryPoolType_PINNED_HOST:
+			fPools[i].total_size = 4ull << 30;
+			fPools[i].free_list = {{0, 4ull << 30}};
+			break;
+		case MemoryPoolType_SPARSE:
+			fPools[i].total_size = 0;
+			fPools[i].free_list = {};
+			break;
+		default:
+			fPools[i].total_size = 0;
+			fPools[i].free_list = {};
+			break;
+		}
+	}
+
 	fVramFree.push_back({0, fVramSize});
 	fGartFree.push_back({0, fGartSize});
 }
@@ -460,4 +498,61 @@ void MemoryManager::release_team(uint32_t team)
 			++it;
 		}
 	}
+}
+
+int32_t MemoryManager::configure_pool(MemoryPoolType type, const MemoryPoolConfig &config)
+{
+	std::lock_guard<std::mutex> guard(fPoolLock);
+	if (static_cast<size_t>(type) >= static_cast<size_t>(MemoryPoolType_COUNT))
+		return RG_EINVAL;
+
+	auto &pool = fPools[static_cast<size_t>(type)];
+	pool.total_size = config.vram_size + config.gart_size + config.cpu_cached_size + config.cpu_uncached_size;
+
+	switch (type) {
+	case MemoryPoolType_VRAM_LOCAL:
+		pool.total_size = config.vram_size;
+		pool.free_list = {{0, config.vram_size}};
+		break;
+	case MemoryPoolType_GTT_MAPPED:
+		pool.total_size = config.gart_size;
+		pool.free_list = {{0, config.gart_size}};
+		break;
+	case MemoryPoolType_CPU_CACHED:
+		pool.total_size = config.cpu_cached_size;
+		pool.free_list = {{0, config.cpu_cached_size}};
+		break;
+	case MemoryPoolType_CPU_UNCACHED:
+		pool.total_size = config.cpu_uncached_size;
+		pool.free_list = {{0, config.cpu_uncached_size}};
+		break;
+	case MemoryPoolType_COMPRESSED:
+	case MemoryPoolType_PINNED_HOST:
+		pool.total_size = config.cpu_cached_size; /* reuse field */
+		pool.free_list = {{0, config.cpu_cached_size}};
+		break;
+	case MemoryPoolType_SPARSE:
+		pool.total_size = 0;
+		pool.free_list = {};
+		break;
+	default:
+		return RG_EINVAL;
+	}
+	return RG_OK;
+}
+
+void MemoryManager::get_pool_stats(MemoryPoolType type, uint64_t *used, uint64_t *free, uint64_t *total)
+{
+	std::lock_guard<std::mutex> guard(fPoolLock);
+	if (static_cast<size_t>(type) >= static_cast<size_t>(MemoryPoolType_COUNT)) {
+		if (used) *used = 0;
+		if (free) *free = 0;
+		if (total) *total = 0;
+		return;
+	}
+
+	auto &pool = fPools[static_cast<size_t>(type)];
+	if (used) *used = pool.used;
+	if (free) *free = pool.total_size - pool.used;
+	if (total) *total = pool.total_size;
 }

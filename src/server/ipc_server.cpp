@@ -62,6 +62,8 @@ int32_t RgServer::handle_info(void *reply, uint32_t reply_size)
 	r->revision = fAsic.revision;
 	r->family = (uint32_t)fAsic.family;
 	r->host_coherent = 1; /* §6.10: x86-64 asumido en v1 */
+	r->preferred = 1; /* Primary GPU by default */
+	r->screen_count = 1; /* Number of connected screens */
 	r->mmio_phys = 0xF0000000ull;
 	r->mmio_size = 0x20000;
 	r->vram_phys = 0x100000000ull;

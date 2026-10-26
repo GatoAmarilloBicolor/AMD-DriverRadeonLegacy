@@ -12,6 +12,7 @@
 #include <stdlib.h>
 
 #include "haiku_kits_integration.h"
+#include "RadeonAddonIntegration.h"
 
 /* ------------------------------------------------------------------ */
 /* Estado global del acelerador                                        */
@@ -416,6 +417,7 @@ void radeon_uninit_accelerant(void)
 
 status_t init_accelerant(device_info *info)
 {
+    register_replicant();
     return get_device_info(info);
 }
 
