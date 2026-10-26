@@ -2,7 +2,7 @@
 #include "ring_manager.h"
 #include "vram_compression.h"
 /*
- * memory_manager.cpp - Implementacion del gestor de BOs con soporte de Huge Pages (2MB+)
+ * memory_manager.cpp - Modern Unified Memory Architecture (hUMA / SVM) & Asynchronous Tiling Engine
  */
 #include "memory_manager.h"
 

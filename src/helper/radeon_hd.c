@@ -558,9 +558,131 @@ static status_t rg_ioctl_pci_cfg(rg_pci_cfg_request *req)
 	return B_OK;
 }
 
+/* ========================================================================
+ * Display / connector contract
+ *
+ * Connector probing (HPD/DDC), mode programming and page flipping belong to
+ * the native Haiku radeon_hd driver (ADR-004), which owns the AtomBIOS and
+ * I2C context this standalone helper does not have. On Haiku these ioctls
+ * therefore fail closed instead of fabricating hardware state. The host
+ * backend exposes one simulated head so the ioctl ABI stays testable.
+ * ======================================================================== */
+
+static status_t rg_ioctl_get_connectors(rg_get_connectors *connectors)
+{
+	if (connectors == NULL)
+		return B_BAD_VALUE;
+
+	memset(connectors, 0, sizeof(*connectors));
+#ifdef __HAIKU__
+	return B_NOT_SUPPORTED;
+#else
+	connectors->count = 1;
+	connectors->connectors[0].connector_id = 0;
+	connectors->connectors[0].connector_type = DRM_MODE_CONNECTOR_Unknown;
+	connectors->connectors[0].crtc_id = 0;
+	connectors->connectors[0].connected = true;
+	connectors->connectors[0].active = true;
+	connectors->connectors[0].encoder_id = 0;
+	connectors->connectors[0].dpms_mode = DRM_MODE_DPMS_ON;
+	return B_OK;
+#endif
+}
+
+status_t rg_ioctl_get_crtcs(rg_get_crtcs *crtcs)
+{
+	if (crtcs == NULL)
+		return B_BAD_VALUE;
+
+	memset(crtcs, 0, sizeof(*crtcs));
+#ifdef __HAIKU__
+	return B_NOT_SUPPORTED;
+#else
+	crtcs->count = 1;
+	crtcs->crtcs[0].crtc_id = 0;
+	crtcs->crtcs[0].active = true;
+	crtcs->crtcs[0].gamma_size = 0;
+	return B_OK;
+#endif
+}
+
+status_t rg_ioctl_set_crtc(rg_set_crtc *crtc)
+{
+	if (crtc == NULL)
+		return B_BAD_VALUE;
+
+	if (crtc->mode_valid
+		&& (crtc->mode.timing.h_total == 0 || crtc->mode.timing.v_total == 0))
+		return B_BAD_VALUE;
+
+#ifdef __HAIKU__
+	return B_NOT_SUPPORTED;
+#else
+	RG_LOG("CRTC %u -> %ux%u", crtc->crtc_id,
+		crtc->mode.virtual_width, crtc->mode.virtual_height);
+	return B_OK;
+#endif
+}
+
+status_t rg_ioctl_page_flip(rg_page_flip *flip)
+{
+	if (flip == NULL)
+		return B_BAD_VALUE;
+
+#ifdef __HAIKU__
+	return B_NOT_SUPPORTED;
+#else
+	RG_LOG("Page flip CRTC %u -> FB %u", flip->crtc_id, flip->fb_id);
+	return B_OK;
+#endif
+}
+
+status_t rg_ioctl_hotplug_event(rg_hotplug_event *event)
+{
+	if (event == NULL)
+		return B_BAD_VALUE;
+
+	event->connected = 0;
+#ifdef __HAIKU__
+	return B_NOT_SUPPORTED;
+#else
+	if (event->connector_id != 0)
+		return B_BAD_VALUE;
+	event->connected = 1;
+	return B_OK;
+#endif
+}
+
+/*
+ * Minimum payload size for each ioctl. A zero result means the ioctl takes no
+ * buffer (IRQ_DETACH) or is unknown; the dispatch rejects the latter.
+ */
+static size_t rg_ioctl_payload_size(uint32_t code)
+{
+	switch (code) {
+		case RG_IOCTL_GET_INFO:			return sizeof(rg_kernel_info);
+		case RG_IOCTL_MAP_MMIO:
+		case RG_IOCTL_MAP_VRAM:			return sizeof(rg_map_request);
+		case RG_IOCTL_TRANSLATE_PHYS:	return sizeof(rg_translate_request);
+		case RG_IOCTL_IRQ_ATTACH:		return sizeof(rg_irq_request);
+		case RG_IOCTL_IRQ_DETACH:		return 0;
+		case RG_IOCTL_PCI_CFG:			return sizeof(rg_pci_cfg_request);
+		case RG_IOCTL_GET_CONNECTORS:	return sizeof(rg_get_connectors);
+		case RG_IOCTL_GET_CRTCS:		return sizeof(rg_get_crtcs);
+		case RG_IOCTL_SET_CRTC:			return sizeof(rg_set_crtc);
+		case RG_IOCTL_PAGE_FLIP:		return sizeof(rg_page_flip);
+		case RG_IOCTL_HOTPLUG_EVENT:	return sizeof(rg_hotplug_event);
+		default:						return 0;
+	}
+}
+
 static status_t rg_control(void *cookie, uint32_t code, void *buffer, size_t size)
 {
+	size_t needed = rg_ioctl_payload_size(code);
+
 	(void)cookie;
+	if (needed != 0 && (buffer == NULL || size < needed))
+		return B_BAD_VALUE;
 	switch (code) {
 		case RG_IOCTL_GET_INFO:
 			return rg_ioctl_get_info(buffer, size);
@@ -576,6 +698,16 @@ static status_t rg_control(void *cookie, uint32_t code, void *buffer, size_t siz
 			return rg_ioctl_irq_detach();
 		case RG_IOCTL_PCI_CFG:
 			return rg_ioctl_pci_cfg((rg_pci_cfg_request *)buffer);
+		case RG_IOCTL_GET_CONNECTORS:
+			return rg_ioctl_get_connectors((rg_get_connectors *)buffer);
+		case RG_IOCTL_GET_CRTCS:
+			return rg_ioctl_get_crtcs((rg_get_crtcs *)buffer);
+		case RG_IOCTL_SET_CRTC:
+			return rg_ioctl_set_crtc((rg_set_crtc *)buffer);
+		case RG_IOCTL_PAGE_FLIP:
+			return rg_ioctl_page_flip((rg_page_flip *)buffer);
+		case RG_IOCTL_HOTPLUG_EVENT:
+			return rg_ioctl_hotplug_event((rg_hotplug_event *)buffer);
 		default:
 			return B_BAD_VALUE;
 	}
