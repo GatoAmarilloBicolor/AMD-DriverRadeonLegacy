@@ -1,65 +1,35 @@
 /*
- * radeon_legacy_kernel.h - Kernel-mode driver for Haiku.
- * Separated from userland: handles hardware init, memory management,
- * and provides a minimal interface to the user-space accelerant.
+ * radeon_legacy_kernel.h - Haiku kernel module for legacy Radeon GPUs.
+ *
+ * This is a real legacy-style driver (init_hardware/publish_devices/
+ * find_device/init_driver) that probes the PCI bus itself. It exposes the
+ * RG_IOCTL_* contract from src/helper/helper_ioctls.h to userland.
+ *
+ * Display modesetting (AtomBIOS/DDC) is intentionally not implemented in the
+ * standalone module; it is the integration point documented in
+ * docs/HAIKU_INTEGRATION.md.
  */
-#ifndef R_ADEON_LEGACY_KERNEL_H
-#define R_ADEON_LEGACY_KERNEL_H
+#ifndef RADEON_LEGACY_KERNEL_H
+#define RADEON_LEGACY_KERNEL_H
 
 #include <Drivers.h>
-#include <kernel/OS.h>
-#include <media/kernel/Framebuffer.h>
+#include <SupportDefs.h>
 
-#include "common/rg_types.h"
-#include "server/memory_manager.h"
+#define RG_LEGACY_DEVICE_PREFIX		"graphics/radeon_legacy_"
+#define RG_LEGACY_ACCELERANT_NAME	"radeon_legacy.accelerant"
+#define RG_LEGACY_MAX_DEVICES		4
 
-struct rg_asic_desc;
+/*
+ * Legacy entry points. api_version must be B_CUR_DRIVER_API_VERSION (2).
+ * These are the only symbols the kernel looks up in the add-on image.
+ */
+extern "C" {
+status_t	init_hardware(void);
+const char	**publish_devices(void);
+device_hooks	*find_device(const char *name);
+status_t	init_driver(void);
+void		uninit_driver(void);
+extern int32	api_version;
+}
 
-class RadeonLegacyKernel {
-public:
-    RadeonLegacyKernel();
-    ~RadeonLegacyKernel();
-
-    // Kernel driver entry points
-    status_t init_driver(image_id driver_image);
-    status_t uninit_driver();
-
-    // Device hooks
-    status_t device_open_hook(void** cookie);
-    status_t device_close_hook(void* cookie);
-    status_t device_free_hook(void* cookie);
-    status_t device_control_hook(void* cookie, uint32 op, void* data, size_t length);
-
-    // Device info
-    status_t get_static_info(struct device_static_info* info);
-
-    // Hardware initialization
-    status_t detect_hardware();
-    status_t setup_memory();
-
-private:
-    // PCI device info
-    pci_module_info* fPCI;
-    int32 fPCIIndex;
-
-    // Hardware state
-    rg_asic_desc fASIC;
-    int32 fFD;  // File descriptor
-
-    // Memory management
-    MemoryManager fMemory;
-
-    // Interrupt cookie
-    interrupt_cookie fIRQCookie;
-
-    // Framebuffer
-    area_id fFBArea;
-    void* fFBVirtual;
-    uint32 fFBSize;
-
-    // Connector state
-    int32 fConnectorCount;
-    bool fConnectors[4];
-};
-
-extern RadeonLegacyKernel* gKernelDriver;
+#endif	/* RADEON_LEGACY_KERNEL_H */

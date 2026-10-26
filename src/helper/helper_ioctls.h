@@ -127,6 +127,7 @@ typedef struct rg_pci_cfg_request {
  * The userland accelerant converts between the two representations.
  * Verified against headers/os/add-ons/graphics/Accelerant.h (master):
  * display_timing is 24 bytes, display_mode is 40 bytes.
+ * Sync polarity is encoded in the timing flags, never in extra fields.
  */
 typedef struct rg_display_timing {
 	uint32_t	pixel_clock;	/* kHz */
@@ -138,9 +139,7 @@ typedef struct rg_display_timing {
 	uint16_t	v_sync_start;
 	uint16_t	v_sync_end;
 	uint16_t	v_total;
-uint16_t h_sync_polarity; /* 0 = positive, 1 = negative */
-uint16_t v_sync_polarity; /* 0 = positive, 1 = negative */
-uint32_t flags; /* sync polarity, etc. */
+	uint32_t	flags;			/* RG_TIMING_* */
 } rg_display_timing;
 
 typedef struct rg_display_mode {
@@ -150,8 +149,36 @@ typedef struct rg_display_mode {
 	uint16_t	virtual_height;	/* lines */
 	uint16_t	h_display_start;
 	uint16_t	v_display_start;
-	uint32_t	flags;			/* B_SCROLL, B_DPMS, ... */
+	uint32_t	flags;			/* RG_MODE_* */
 } rg_display_mode;
+
+/*
+ * Numeric mirrors of the Haiku <Accelerant.h> mode/timing flags. The values
+ * are identical so a static_cast of the bitfields is safe in both directions.
+ */
+enum {
+	RG_MODE_SCROLL			= 1u << 0,
+	RG_MODE_8_BIT_DAC		= 1u << 1,
+	RG_MODE_HARDWARE_CURSOR	= 1u << 2,
+	RG_MODE_PARALLEL_ACCESS	= 1u << 3,
+	RG_MODE_DPMS			= 1u << 4,
+	RG_MODE_IO_FB_NA		= 1u << 5
+};
+
+enum {
+	RG_DPMS_ON				= 1u << 0,
+	RG_DPMS_STANDBY			= 1u << 1,
+	RG_DPMS_SUSPEND			= 1u << 2,
+	RG_DPMS_OFF				= 1u << 3
+};
+
+enum {
+	RG_TIMING_BLANK_PEDESTAL	= 1u << 27,
+	RG_TIMING_INTERLACED		= 1u << 28,
+	RG_TIMING_POSITIVE_HSYNC	= 1u << 29,
+	RG_TIMING_POSITIVE_VSYNC	= 1u << 30,
+	RG_TIMING_SYNC_ON_GREEN		= 1u << 31
+};
 
 /* Display/Connector detection */
 typedef struct rg_connector_info {
