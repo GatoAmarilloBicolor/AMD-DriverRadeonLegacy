@@ -232,6 +232,31 @@ static void test_verifier()
 				default: fuzz[i] = r; break;
 			}
 		}
+
+		/* Inyectar IBs válidos conocidos cada N iteraciones para ejercitar
+		 * el camino de aceptación (política de test permite NOP, SET_*_REG,
+		 * CP_DMA, DRAW). */
+		if ((iter % 1000) == 0) {
+			/* NOP tipo 3 (opcode 0x10, total=1) - siempre válido */
+			fuzz.clear();
+			fuzz.push_back((3u << 30) | (0u << 16) | (0x10u << 8) | 1u);
+			dwords = 1;
+		} else if ((iter % 1000) == 1) {
+			/* SET_CONFIG_REG (opcode 0x14) con registro en rango RELOC */
+			fuzz.clear();
+			fuzz.push_back((3u << 30) | (2u << 16) | (0x14u << 8) | 3u);
+			fuzz.push_back(0x2000u);  /* registro en rango 0x2000-0x20FF (RELOC) */
+			fuzz.push_back(0u);       /* índice de reloc 0 */
+			dwords = 3;
+		} else if ((iter % 1000) == 2) {
+			/* SET_CONTEXT_REG (opcode 0x15) con registro en rango FREE */
+			fuzz.clear();
+			fuzz.push_back((3u << 30) | (2u << 16) | (0x15u << 8) | 3u);
+			fuzz.push_back(0x8000u);  /* registro en rango 0x8000-0x80FF (FREE) */
+			fuzz.push_back(0u);       /* valor */
+			dwords = 3;
+		}
+
 		uint32_t n_rel = 4;
 		rg_reloc rels[4] = {
 			{ 1 + (seed % 8), 0, 0, 0, 0, 0 },
