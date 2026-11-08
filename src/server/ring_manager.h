@@ -31,10 +31,10 @@ enum rg_ring_id {
 };
 
 struct rg_ring_stats {
-	uint64_t submitted;
-	uint64_t completed;
-	uint64_t timeouts;
-	uint64_t resets;
+	std::atomic<uint64_t> submitted{0};
+	std::atomic<uint64_t> completed{0};
+	std::atomic<uint64_t> timeouts{0};
+	std::atomic<uint64_t> resets{0};
 };
 
 class RingManager : public IFenceAllocator {
@@ -55,7 +55,16 @@ public:
 	/* GPU colgada: reset suave y contextos perdidos. */
 	int32_t soft_reset();
 
-	const rg_ring_stats &stats(rg_ring_id ring) const { return fRings[ring].stats; }
+	rg_ring_stats stats(rg_ring_id ring) const {
+		if (ring >= RG_RING_COUNT) return {};
+		const auto &s = fRings[ring].stats;
+		return {
+			s.submitted.load(std::memory_order_relaxed),
+			s.completed.load(std::memory_order_relaxed),
+			s.timeouts.load(std::memory_order_relaxed),
+			s.resets.load(std::memory_order_relaxed)
+		};
+	}
 
 	// IFenceAllocator implementation
 	void *allocate_fence_slot() override;
@@ -74,6 +83,7 @@ public:
 	uint32_t ih_get_wptr_hi();
 
 	static constexpr int32_t kTimeout = -110;
+    ~RingManager();
 
 private:
 	struct Entry { uint64_t fence; std::vector<uint32_t> dwords; };

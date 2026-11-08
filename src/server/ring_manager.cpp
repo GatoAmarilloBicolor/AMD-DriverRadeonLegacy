@@ -71,7 +71,7 @@ int32_t RingManager::submit(rg_ring_id ring, const uint32_t *dwords, uint32_t co
 	e.fence = r.next_fence++;
 	e.dwords.assign(dwords, dwords + count);
 	r.queue.push_back(std::move(e));
-	r.stats.submitted++;
+	r.stats.submitted.fetch_add(1, std::memory_order_relaxed);
 	if (fence_out != nullptr)
 		*fence_out = r.queue.back().fence;
 	
@@ -110,7 +110,7 @@ int32_t RingManager::wait_fence(uint64_t fence, uint32_t timeout_ms)
 	
 	/* Mitigación de cuelgues (Punto 14): Disparo automático de soft_reset si el timeout expira */
 	for (uint32_t i = 0; i < RG_RING_COUNT; i++) {
-		fRings[i].stats.timeouts++;
+		fRings[i].stats.timeouts.fetch_add(1, std::memory_order_relaxed);
 	}
 	lock.unlock();
 	soft_reset();
@@ -144,7 +144,7 @@ int32_t RingManager::soft_reset()
 		 * valor encolado para no bloquear los clientes para siempre. */
 		r.done_fence = r.next_fence - 1;
 		r.queue.clear();
-		r.stats.resets++;
+		r.stats.resets.fetch_add(1, std::memory_order_relaxed);
 	}
 	fCv.notify_all();
 	return RG_OK;
@@ -159,7 +159,7 @@ void RingManager::drain()
 			continue;
 		Ring &r = fRings[i];
 		r.done_fence = r.next_fence - 1;
-		r.stats.completed += r.queue.size();
+		r.stats.completed.fetch_add(r.queue.size(), std::memory_order_relaxed);
 		r.queue.clear();
 	}
 	fCv.notify_all();
@@ -270,4 +270,16 @@ uint32_t RingManager::ih_get_wptr_hi()
 {
     std::lock_guard<std::mutex> guard(fLock);
     return fRings[RG_RING_IH].wptr_hi;
+}
+
+RingManager::~RingManager()
+{
+    std::lock_guard<std::mutex> guard(fFenceLock);
+    for (auto &slot : fFenceSlots) {
+        if (slot.cpu_addr) {
+            std::free(slot.cpu_addr);
+            slot.cpu_addr = nullptr;
+        }
+    }
+    fFenceSlots.clear();
 }

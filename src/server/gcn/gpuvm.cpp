@@ -153,6 +153,7 @@ VmidManager::VmidManager(uint32_t count)
 	fSlots.resize(count);
 	for (auto &s : fSlots)
 		s = {0, 0, false};
+	fTeamToVmid.reserve(count * 2);
 }
 
 int32_t VmidManager::acquire(uint32_t team, uint32_t *vmid_out)
@@ -160,18 +161,24 @@ int32_t VmidManager::acquire(uint32_t team, uint32_t *vmid_out)
 	if (vmid_out == nullptr)
 		return RG_EINVAL;
 	std::lock_guard<std::mutex> guard(fLock);
-	for (uint32_t i = 0; i < fSlots.size(); i++) {
-		if (fSlots[i].used && fSlots[i].team == team) {
-			fSlots[i].last_use = ++fClock;
-			*vmid_out = i;
+	/* O(1) lookup: check if team already has a VMID */
+	auto it = fTeamToVmid.find(team);
+	if (it != fTeamToVmid.end()) {
+		uint32_t vmid = it->second;
+		if (vmid < fSlots.size() && fSlots[vmid].used && fSlots[vmid].team == team) {
+			fSlots[vmid].last_use = ++fClock;
+			*vmid_out = vmid;
 			return RG_OK;
 		}
+		/* Stale entry - fall through to re-assign */
 	}
+	
 	for (uint32_t i = 0; i < fSlots.size(); i++) {
 		if (!fSlots[i].used) {
 			fSlots[i].used = true;
 			fSlots[i].team = team;
 			fSlots[i].last_use = ++fClock;
+			fTeamToVmid[team] = i;
 			*vmid_out = i;
 			return RG_OK;
 		}
@@ -185,8 +192,13 @@ int32_t VmidManager::acquire(uint32_t team, uint32_t *vmid_out)
 			victim = i;
 		}
 	}
+	/* Remove old team mapping if victim was used */
+	if (fSlots[victim].used) {
+		fTeamToVmid.erase(fSlots[victim].team);
+	}
 	fSlots[victim].team = team;
 	fSlots[victim].last_use = ++fClock;
+	fTeamToVmid[team] = victim;
 	*vmid_out = victim;
 	return RG_OK;
 }
@@ -194,9 +206,13 @@ int32_t VmidManager::acquire(uint32_t team, uint32_t *vmid_out)
 void VmidManager::release(uint32_t team)
 {
 	std::lock_guard<std::mutex> guard(fLock);
-	for (auto &s : fSlots) {
-		if (s.used && s.team == team)
-			s = {0, 0, false};
+	auto it = fTeamToVmid.find(team);
+	if (it != fTeamToVmid.end()) {
+		uint32_t vmid = it->second;
+		if (vmid < fSlots.size() && fSlots[vmid].used && fSlots[vmid].team == team) {
+			fSlots[vmid] = {0, 0, false};
+		}
+		fTeamToVmid.erase(it);
 	}
 }
 

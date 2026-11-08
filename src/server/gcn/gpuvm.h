@@ -84,6 +84,8 @@ public:
 private:
 	struct Slot { uint32_t team; uint64_t last_use; bool used; };
 	std::vector<Slot> fSlots;
+	/* O(1) team -> vmid lookup for acquire/release */
+	std::unordered_map<uint32_t, uint32_t> fTeamToVmid;
 	uint64_t fClock = 0;
 	mutable std::mutex fLock;
 };
